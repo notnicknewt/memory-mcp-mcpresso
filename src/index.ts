@@ -872,6 +872,10 @@ const memoryResource = createResource({
         }
 
         return output;
+        } catch (e: any) {
+          console.error(`[list_patterns] Error:`, e.message);
+          return `Error listing patterns: ${e.message}`;
+        }
       }
     },
 
