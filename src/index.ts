@@ -365,19 +365,23 @@ const memoryResource = createResource({
         if (!user) throw new Error('Authentication required');
         const userId = user.id || user.sub;
 
+        console.log(`[create_project] User: ${userId}, Name: ${args.name}`);
+
         try {
           const result = await pool.query(
             'INSERT INTO projects (user_id, name, description) VALUES ($1, $2, $3) RETURNING id',
             [userId, args.name, args.description || '']
           );
 
+          console.log(`[create_project] Created project ID: ${result.rows[0].id}`);
           setUserContext(userId, result.rows[0].id, args.name);
           return `Created and selected project: ${args.name}`;
         } catch (e: any) {
+          console.error(`[create_project] Error:`, e.message, e.code);
           if (e.code === '23505') {
             return `Project '${args.name}' already exists. Use select_project.`;
           }
-          throw e;
+          return `Error creating project: ${e.message}`;
         }
       }
     },
@@ -666,27 +670,31 @@ const memoryResource = createResource({
     list_commitments: {
       description: 'List commitments by status',
       inputSchema: z.object({
-        status: z.enum(['open', 'done', 'missed', 'rescheduled', 'all']).optional().default('open'),
-        include_overdue: z.boolean().optional().default(true)
+        status: z.enum(['open', 'done', 'missed', 'rescheduled', 'all']).optional(),
+        include_overdue: z.boolean().optional()
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
-        const userId = user.id || user.sub;
+        try {
+          if (!user) throw new Error('Authentication required');
+          const userId = user.id || user.sub;
+          const status = args.status || 'open';
 
-        let query = `SELECT c.*, p.name as project_name
-                     FROM commitments c
-                     LEFT JOIN projects p ON c.project_id = p.id
-                     WHERE c.user_id = $1`;
-        const params: any[] = [userId];
+          console.log(`[list_commitments] User: ${userId}, Status: ${status}`);
 
-        if (args.status !== 'all') {
-          query += ` AND c.status = $2`;
-          params.push(args.status || 'open');
-        }
+          let query = `SELECT c.*, p.name as project_name
+                       FROM commitments c
+                       LEFT JOIN projects p ON c.project_id = p.id
+                       WHERE c.user_id = $1`;
+          const params: any[] = [userId];
 
-        query += ' ORDER BY c.due_date ASC';
+          if (status !== 'all') {
+            query += ` AND c.status = $2`;
+            params.push(status);
+          }
 
-        const result = await pool.query(query, params);
+          query += ' ORDER BY c.due_date ASC';
+
+          const result = await pool.query(query, params);
 
         if (result.rows.length === 0) {
           return `No ${args.status || 'open'} commitments found.`;
@@ -710,6 +718,10 @@ const memoryResource = createResource({
         }
 
         return output;
+        } catch (e: any) {
+          console.error(`[list_commitments] Error:`, e.message);
+          return `Error listing commitments: ${e.message}`;
+        }
       }
     },
 
@@ -808,29 +820,34 @@ const memoryResource = createResource({
     list_patterns: {
       description: 'List all tracked patterns',
       inputSchema: z.object({
-        category: z.enum(['business', 'personal', 'health', 'mindset', 'all']).optional().default('all'),
-        valence: z.enum(['positive', 'negative', 'neutral', 'all']).optional().default('all')
+        category: z.enum(['business', 'personal', 'health', 'mindset', 'all']).optional(),
+        valence: z.enum(['positive', 'negative', 'neutral', 'all']).optional()
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
-        const userId = user.id || user.sub;
+        try {
+          if (!user) throw new Error('Authentication required');
+          const userId = user.id || user.sub;
+          const category = args.category || 'all';
+          const valence = args.valence || 'all';
 
-        let query = 'SELECT * FROM patterns WHERE user_id = $1';
-        const params: any[] = [userId];
-        let paramCount = 2;
+          console.log(`[list_patterns] User: ${userId}, Category: ${category}, Valence: ${valence}`);
 
-        if (args.category !== 'all') {
-          query += ` AND category = $${paramCount++}`;
-          params.push(args.category);
-        }
-        if (args.valence !== 'all') {
-          query += ` AND valence = $${paramCount++}`;
-          params.push(args.valence);
-        }
+          let query = 'SELECT * FROM patterns WHERE user_id = $1';
+          const params: any[] = [userId];
+          let paramCount = 2;
 
-        query += ' ORDER BY category, name';
+          if (category !== 'all') {
+            query += ` AND category = $${paramCount++}`;
+            params.push(category);
+          }
+          if (valence !== 'all') {
+            query += ` AND valence = $${paramCount++}`;
+            params.push(valence);
+          }
 
-        const result = await pool.query(query, params);
+          query += ' ORDER BY category, name';
+
+          const result = await pool.query(query, params);
 
         if (result.rows.length === 0) {
           return 'No patterns recorded yet.';
