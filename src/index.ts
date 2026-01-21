@@ -579,6 +579,166 @@ async function main() {
     res.json({ status: 'ok', database: 'connected' });
   });
 
+  // Admin page
+  app.get('/admin', (_req: Request, res: Response) => {
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Memory MCP - Admin</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 500px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    h1 { color: #333; margin-bottom: 5px; }
+    .subtitle { color: #666; margin-bottom: 30px; }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    h2 { margin-top: 0; color: #444; font-size: 18px; }
+    label { display: block; margin-bottom: 5px; color: #555; font-size: 14px; }
+    input {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 15px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    input:focus { outline: none; border-color: #007bff; }
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    button:hover { background: #0056b3; }
+    .message {
+      padding: 10px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .info { background: #e7f3ff; color: #004085; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Memory MCP Admin</h1>
+  <p class="subtitle">Manage your account</p>
+
+  <div class="info">
+    <strong>Server:</strong> ${SERVER_URL}<br>
+    <strong>Status:</strong> Online
+  </div>
+
+  <div class="card">
+    <h2>Change Password</h2>
+    <div id="pw-message"></div>
+    <form id="password-form">
+      <label>Username</label>
+      <input type="text" name="username" required>
+      <label>Current Password</label>
+      <input type="password" name="current_password" required>
+      <label>New Password</label>
+      <input type="password" name="new_password" required>
+      <button type="submit">Change Password</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Update Profile</h2>
+    <div id="profile-message"></div>
+    <form id="profile-form">
+      <label>Username (to authenticate)</label>
+      <input type="text" name="username" required>
+      <label>Password (to authenticate)</label>
+      <input type="password" name="password" required>
+      <label>New Username (optional)</label>
+      <input type="text" name="new_username" placeholder="Leave blank to keep current">
+      <label>New Email (optional)</label>
+      <input type="email" name="new_email" placeholder="Leave blank to keep current">
+      <button type="submit">Update Profile</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Create New User</h2>
+    <div id="create-message"></div>
+    <form id="create-form">
+      <label>Username</label>
+      <input type="text" name="username" required>
+      <label>Email</label>
+      <input type="email" name="email" required>
+      <label>Password</label>
+      <input type="password" name="password" required>
+      <button type="submit">Create User</button>
+    </form>
+  </div>
+
+  <script>
+    async function submitForm(form, url, messageEl) {
+      const data = Object.fromEntries(new FormData(form));
+      // Remove empty fields
+      Object.keys(data).forEach(k => { if (!data[k]) delete data[k]; });
+
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        const json = await res.json();
+
+        if (json.success) {
+          messageEl.className = 'message success';
+          messageEl.textContent = json.message || 'Success!';
+          form.reset();
+        } else {
+          messageEl.className = 'message error';
+          messageEl.textContent = json.error || 'Something went wrong';
+        }
+      } catch (e) {
+        messageEl.className = 'message error';
+        messageEl.textContent = 'Network error: ' + e.message;
+      }
+    }
+
+    document.getElementById('password-form').onsubmit = (e) => {
+      e.preventDefault();
+      submitForm(e.target, '/change-password', document.getElementById('pw-message'));
+    };
+
+    document.getElementById('profile-form').onsubmit = (e) => {
+      e.preventDefault();
+      submitForm(e.target, '/update-user', document.getElementById('profile-message'));
+    };
+
+    document.getElementById('create-form').onsubmit = (e) => {
+      e.preventDefault();
+      submitForm(e.target, '/register-user', document.getElementById('create-message'));
+    };
+  </script>
+</body>
+</html>
+    `);
+  });
+
   // User registration endpoint (for initial setup)
   app.post('/register-user', async (req: Request, res: Response) => {
     try {
