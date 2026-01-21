@@ -598,6 +598,95 @@ async function main() {
     }
   });
 
+  // Change password endpoint
+  app.post('/change-password', async (req: Request, res: Response) => {
+    try {
+      const { username, current_password, new_password } = req.body;
+      if (!username || !current_password || !new_password) {
+        res.status(400).json({ error: 'username, current_password, and new_password required' });
+        return;
+      }
+
+      // Verify current password
+      const user = await authenticateUser({ username, password: current_password });
+      if (!user) {
+        res.status(401).json({ error: 'Invalid username or current password' });
+        return;
+      }
+
+      // Update password
+      const newHash = await hashPassword(new_password);
+      await pool.query(
+        'UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+        [newHash, user.id]
+      );
+
+      res.json({ success: true, message: 'Password changed successfully' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Update user details endpoint
+  app.post('/update-user', async (req: Request, res: Response) => {
+    try {
+      const { username, password, new_username, new_email } = req.body;
+      if (!username || !password) {
+        res.status(400).json({ error: 'username and password required for authentication' });
+        return;
+      }
+
+      // Verify credentials
+      const user = await authenticateUser({ username, password });
+      if (!user) {
+        res.status(401).json({ error: 'Invalid username or password' });
+        return;
+      }
+
+      // Build update query
+      const updates: string[] = [];
+      const values: any[] = [];
+      let paramCount = 1;
+
+      if (new_username) {
+        updates.push(`username = $${paramCount++}`);
+        values.push(new_username);
+      }
+      if (new_email) {
+        updates.push(`email = $${paramCount++}`);
+        values.push(new_email);
+      }
+
+      if (updates.length === 0) {
+        res.status(400).json({ error: 'No updates provided (new_username or new_email)' });
+        return;
+      }
+
+      updates.push(`updated_at = CURRENT_TIMESTAMP`);
+      values.push(user.id);
+
+      await pool.query(
+        `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramCount}`,
+        values
+      );
+
+      res.json({
+        success: true,
+        message: 'User updated successfully',
+        user: {
+          username: new_username || user.username,
+          email: new_email || user.email
+        }
+      });
+    } catch (e: any) {
+      if (e.code === '23505') {
+        res.status(400).json({ error: 'Username or email already exists' });
+        return;
+      }
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.listen(PORT, () => {
     console.log(`Memory MCP Server running on ${SERVER_URL}`);
     console.log(`OAuth endpoints: ${SERVER_URL}/authorize, ${SERVER_URL}/token`);
