@@ -29,10 +29,39 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Initialize database schema
+// Initialize database schema with migrations
 async function initDatabase() {
   const client = await pool.connect();
   try {
+    console.log('=== Database Schema Initialization ===');
+
+    // Helper to add column if it doesn't exist
+    const addColumn = async (table: string, column: string, definition: string) => {
+      try {
+        await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`);
+        console.log(`    + Added column ${table}.${column}`);
+      } catch (e: any) {
+        if (e.message.includes('already exists')) {
+          console.log(`    - Column ${table}.${column} exists`);
+        } else {
+          throw e;
+        }
+      }
+    };
+
+    // Helper to check if table exists
+    const tableExists = async (table: string): Promise<boolean> => {
+      const result = await client.query(
+        `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)`,
+        [table]
+      );
+      return result.rows[0].exists;
+    };
+
+    // =========================================================================
+    // USERS TABLE
+    // =========================================================================
+    console.log('\n[1/9] users table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -44,18 +73,42 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    console.log('  OK');
 
+    // =========================================================================
+    // PROJECTS TABLE
+    // =========================================================================
+    console.log('\n[2/9] projects table...');
+    const projectsExisted = await tableExists('projects');
     await client.query(`
       CREATE TABLE IF NOT EXISTS projects (
         id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
         name TEXT NOT NULL,
         description TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, name)
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migration: Add user_id if missing
+    await addColumn('projects', 'user_id', 'TEXT');
+    // Set default user_id for existing rows
+    if (projectsExisted) {
+      const updated = await client.query(`
+        UPDATE projects SET user_id = COALESCE(
+          (SELECT id FROM users LIMIT 1),
+          'legacy'
+        ) WHERE user_id IS NULL
+        RETURNING id
+      `);
+      if (updated.rowCount && updated.rowCount > 0) {
+        console.log(`    Migrated ${updated.rowCount} existing projects with user_id`);
+      }
+    }
+    console.log('  OK');
 
+    // =========================================================================
+    // SESSIONS TABLE
+    // =========================================================================
+    console.log('\n[3/9] sessions table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS sessions (
         id SERIAL PRIMARY KEY,
@@ -66,7 +119,14 @@ async function initDatabase() {
         outcome TEXT
       )
     `);
+    // Migration: Add user_id if missing (for sessions not tied to projects)
+    await addColumn('sessions', 'user_id', 'TEXT');
+    console.log('  OK');
 
+    // =========================================================================
+    // CHANGE_LOG TABLE
+    // =========================================================================
+    console.log('\n[4/9] change_log table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS change_log (
         id SERIAL PRIMARY KEY,
@@ -78,7 +138,12 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    console.log('  OK');
 
+    // =========================================================================
+    // LESSONS_LEARNED TABLE
+    // =========================================================================
+    console.log('\n[5/9] lessons_learned table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS lessons_learned (
         id SERIAL PRIMARY KEY,
@@ -89,7 +154,12 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    console.log('  OK');
 
+    // =========================================================================
+    // CONTEXT_SNAPSHOTS TABLE
+    // =========================================================================
+    console.log('\n[6/9] context_snapshots table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS context_snapshots (
         id SERIAL PRIMARY KEY,
@@ -99,8 +169,12 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    console.log('  OK');
 
-    // Accountability tables
+    // =========================================================================
+    // COMMITMENTS TABLE (Accountability)
+    // =========================================================================
+    console.log('\n[7/9] commitments table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS commitments (
         id SERIAL PRIMARY KEY,
@@ -116,7 +190,12 @@ async function initDatabase() {
         completed_at TIMESTAMP
       )
     `);
+    console.log('  OK');
 
+    // =========================================================================
+    // PATTERNS TABLE (Accountability)
+    // =========================================================================
+    console.log('\n[8/9] patterns table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS patterns (
         id SERIAL PRIMARY KEY,
@@ -130,7 +209,12 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    console.log('  OK');
 
+    // =========================================================================
+    // CHECK_INS TABLE (Accountability)
+    // =========================================================================
+    console.log('\n[9/9] check_ins table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS check_ins (
         id SERIAL PRIMARY KEY,
@@ -143,8 +227,23 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    console.log('  OK');
 
-    console.log('Database schema initialized');
+    // =========================================================================
+    // VERIFY ALL TABLES
+    // =========================================================================
+    console.log('\n=== Verification ===');
+    const tables = ['users', 'projects', 'sessions', 'change_log', 'lessons_learned',
+                    'context_snapshots', 'commitments', 'patterns', 'check_ins'];
+    for (const table of tables) {
+      const exists = await tableExists(table);
+      console.log(`  ${exists ? '✓' : '✗'} ${table}`);
+    }
+
+    console.log('\n=== Database schema initialized successfully ===');
+  } catch (error) {
+    console.error('Database initialization error:', error);
+    throw error;
   } finally {
     client.release();
   }
