@@ -504,7 +504,7 @@ async function main() {
     serverUrl: SERVER_URL,
     jwtSecret: JWT_SECRET,
     allowDynamicClientRegistration: true, // Required for Claude.ai
-    requirePkce: true,
+    requirePkce: false, // Claude.ai may not send PKCE in some flows
     allowRefreshTokens: true,
     auth: {
       authenticateUser: async (credentials: { username: string; password: string }, _context: UserAuthContext) => {
