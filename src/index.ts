@@ -335,7 +335,8 @@ const memoryResource = createResource({
       description: 'List all projects in memory',
       inputSchema: z.object({}),
       handler: async (_args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[list_projects] Called`);
+        if (!user) return 'Error: Authentication required';
 
         const result = await pool.query(
           'SELECT name, description FROM projects WHERE user_id = $1 ORDER BY name',
@@ -356,13 +357,23 @@ const memoryResource = createResource({
 
     // Create a new project
     create_project: {
-      description: 'Create a new project',
+      description: 'Create a new project. Requires a name parameter.',
       inputSchema: z.object({
-        name: z.string().describe('Project name (unique identifier)'),
+        name: z.string().optional().describe('Project name (unique identifier) - REQUIRED'),
         description: z.string().optional().describe('Project description')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[create_project] Called with args:`, JSON.stringify(args));
+
+        // Validate required param (Zod made optional to handle Claude.ai empty args)
+        if (!args || !args.name) {
+          return 'Error: name parameter is required. Usage: create_project(name: "my-project", description: "optional")';
+        }
+
+        if (!user) {
+          console.log(`[create_project] No user context`);
+          return 'Error: Authentication required';
+        }
         const userId = user.id || user.sub;
 
         console.log(`[create_project] User: ${userId}, Name: ${args.name}`);
@@ -390,10 +401,16 @@ const memoryResource = createResource({
     select_project: {
       description: 'Select a project to work with',
       inputSchema: z.object({
-        name: z.string().describe('Project name')
+        name: z.string().optional().describe('Project name - REQUIRED')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[select_project] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.name) {
+          return 'Error: name parameter is required. Usage: select_project(name: "my-project")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const result = await pool.query(
@@ -415,7 +432,7 @@ const memoryResource = createResource({
       description: 'Get current project memory status',
       inputSchema: z.object({}),
       handler: async (_args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -456,14 +473,20 @@ const memoryResource = createResource({
     session_start: {
       description: 'Start a new session',
       inputSchema: z.object({
-        summary: z.string().describe('Session focus')
+        summary: z.string().optional().describe('Session focus - REQUIRED')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[session_start] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.summary) {
+          return 'Error: summary parameter is required. Usage: session_start(summary: "Working on feature X")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
-        if (!ctx) return 'No project selected.';
+        if (!ctx) return 'No project selected. Use select_project first.';
 
         const result = await pool.query(
           'INSERT INTO sessions (project_id, summary) VALUES ($1, $2) RETURNING id',
@@ -478,11 +501,17 @@ const memoryResource = createResource({
     session_end: {
       description: 'End the current session',
       inputSchema: z.object({
-        summary: z.string().describe('What was accomplished'),
+        summary: z.string().optional().describe('What was accomplished - REQUIRED'),
         outcome: z.string().optional().describe('completed/paused/blocked')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[session_end] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.summary) {
+          return 'Error: summary parameter is required. Usage: session_end(summary: "Completed feature X", outcome: "completed")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -502,13 +531,19 @@ const memoryResource = createResource({
     log_change: {
       description: 'Log a change with reasoning',
       inputSchema: z.object({
-        file_path: z.string(),
-        change_type: z.string(),
-        what_changed: z.string(),
-        why_changed: z.string()
+        file_path: z.string().optional().describe('REQUIRED'),
+        change_type: z.string().optional().describe('REQUIRED'),
+        what_changed: z.string().optional().describe('REQUIRED'),
+        why_changed: z.string().optional().describe('REQUIRED')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[log_change] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.file_path || !args.change_type || !args.what_changed || !args.why_changed) {
+          return 'Error: all parameters required. Usage: log_change(file_path, change_type, what_changed, why_changed)';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -528,12 +563,18 @@ const memoryResource = createResource({
     add_lesson: {
       description: 'Record a lesson learned',
       inputSchema: z.object({
-        problem: z.string(),
-        solution: z.string(),
+        problem: z.string().optional().describe('REQUIRED'),
+        solution: z.string().optional().describe('REQUIRED'),
         avoid: z.string().optional()
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[add_lesson] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.problem || !args.solution) {
+          return 'Error: problem and solution are required. Usage: add_lesson(problem, solution, avoid?)';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -557,7 +598,7 @@ const memoryResource = createResource({
         summary: z.string()
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -578,7 +619,7 @@ const memoryResource = createResource({
       description: 'Get all lessons learned',
       inputSchema: z.object({}),
       handler: async (_args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -608,7 +649,7 @@ const memoryResource = createResource({
         limit: z.number().optional().default(10)
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const ctx = getUserContext(userId);
 
@@ -639,13 +680,19 @@ const memoryResource = createResource({
     create_commitment: {
       description: 'Create a new commitment/accountability item',
       inputSchema: z.object({
-        description: z.string().describe('What you are committing to'),
-        due_date: z.string().describe('Due date (YYYY-MM-DD)'),
+        description: z.string().optional().describe('What you are committing to - REQUIRED'),
+        due_date: z.string().optional().describe('Due date (YYYY-MM-DD) - REQUIRED'),
         type: z.enum(['one-off', 'recurring']).optional().default('one-off'),
         project_name: z.string().optional().describe('Associated project (optional)')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[create_commitment] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.description || !args.due_date) {
+          return 'Error: description and due_date are required. Usage: create_commitment(description: "task", due_date: "2026-01-25")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         let projectId = null;
@@ -675,7 +722,7 @@ const memoryResource = createResource({
       }),
       handler: async (args: any, user: any) => {
         try {
-          if (!user) throw new Error('Authentication required');
+          if (!user) return 'Error: Authentication required';
           const userId = user.id || user.sub;
           const status = args.status || 'open';
 
@@ -728,12 +775,18 @@ const memoryResource = createResource({
     update_commitment: {
       description: 'Update commitment status (done/missed)',
       inputSchema: z.object({
-        id: z.number().describe('Commitment ID'),
-        status: z.enum(['done', 'missed']).describe('New status'),
+        id: z.number().optional().describe('Commitment ID - REQUIRED'),
+        status: z.enum(['done', 'missed']).optional().describe('New status - REQUIRED'),
         outcome_notes: z.string().optional().describe('What happened')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[update_commitment] Called with args:`, JSON.stringify(args));
+
+        if (!args || args.id === undefined || !args.status) {
+          return 'Error: id and status are required. Usage: update_commitment(id: 1, status: "done", outcome_notes?: "...")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const completedAt = args.status === 'done' ? 'CURRENT_TIMESTAMP' : 'NULL';
@@ -757,12 +810,18 @@ const memoryResource = createResource({
     reschedule_commitment: {
       description: 'Reschedule a commitment to a new date',
       inputSchema: z.object({
-        id: z.number().describe('Commitment ID'),
-        new_due_date: z.string().describe('New due date (YYYY-MM-DD)'),
+        id: z.number().optional().describe('Commitment ID - REQUIRED'),
+        new_due_date: z.string().optional().describe('New due date (YYYY-MM-DD) - REQUIRED'),
         reason: z.string().optional().describe('Reason for rescheduling')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[reschedule_commitment] Called with args:`, JSON.stringify(args));
+
+        if (!args || args.id === undefined || !args.new_due_date) {
+          return 'Error: id and new_due_date are required. Usage: reschedule_commitment(id: 1, new_due_date: "2026-01-30")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const result = await pool.query(
@@ -795,14 +854,20 @@ const memoryResource = createResource({
     create_pattern: {
       description: 'Record a behavioral pattern/tendency',
       inputSchema: z.object({
-        name: z.string().describe('Pattern name (e.g., "leaves completion tasks")'),
-        description: z.string().describe('What this pattern looks like'),
-        category: z.enum(['business', 'personal', 'health', 'mindset']).describe('Category'),
-        valence: z.enum(['positive', 'negative', 'neutral']).describe('Is this good, bad, or neutral?'),
+        name: z.string().optional().describe('Pattern name - REQUIRED'),
+        description: z.string().optional().describe('What this pattern looks like - REQUIRED'),
+        category: z.enum(['business', 'personal', 'health', 'mindset']).optional().describe('Category - REQUIRED'),
+        valence: z.enum(['positive', 'negative', 'neutral']).optional().describe('Is this good, bad, or neutral? - REQUIRED'),
         initial_example: z.string().optional().describe('First example of this pattern')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[create_pattern] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.name || !args.description || !args.category || !args.valence) {
+          return 'Error: name, description, category, and valence are required. Usage: create_pattern(name, description, category: business|personal|health|mindset, valence: positive|negative|neutral)';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const examples = args.initial_example ? [args.initial_example] : [];
@@ -825,7 +890,7 @@ const memoryResource = createResource({
       }),
       handler: async (args: any, user: any) => {
         try {
-          if (!user) throw new Error('Authentication required');
+          if (!user) return 'Error: Authentication required';
           const userId = user.id || user.sub;
           const category = args.category || 'all';
           const valence = args.valence || 'all';
@@ -882,11 +947,17 @@ const memoryResource = createResource({
     add_pattern_example: {
       description: 'Add an example/instance of a pattern occurring',
       inputSchema: z.object({
-        id: z.number().describe('Pattern ID'),
-        example: z.string().describe('Description of this instance')
+        id: z.number().optional().describe('Pattern ID - REQUIRED'),
+        example: z.string().optional().describe('Description of this instance - REQUIRED')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[add_pattern_example] Called with args:`, JSON.stringify(args));
+
+        if (!args || args.id === undefined || !args.example) {
+          return 'Error: id and example are required. Usage: add_pattern_example(id: 1, example: "Did X today")';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const result = await pool.query(
@@ -908,10 +979,16 @@ const memoryResource = createResource({
     get_pattern: {
       description: 'Get detailed info about a pattern including all examples',
       inputSchema: z.object({
-        id: z.number().describe('Pattern ID')
+        id: z.number().optional().describe('Pattern ID - REQUIRED')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[get_pattern] Called with args:`, JSON.stringify(args));
+
+        if (!args || args.id === undefined) {
+          return 'Error: id is required. Usage: get_pattern(id: 1)';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const result = await pool.query(
@@ -950,12 +1027,18 @@ const memoryResource = createResource({
     create_check_in: {
       description: 'Record an accountability check-in',
       inputSchema: z.object({
-        notes: z.string().describe('Check-in notes'),
+        notes: z.string().optional().describe('Check-in notes - REQUIRED'),
         commitment_ids_completed: z.array(z.number()).optional().describe('IDs of completed commitments'),
         pattern_ids_observed: z.array(z.number()).optional().describe('IDs of patterns that showed up')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[create_check_in] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.notes) {
+          return 'Error: notes are required. Usage: create_check_in(notes: "Session summary", commitment_ids_completed?: [1, 2], pattern_ids_observed?: [3])';
+        }
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         // Get commitments that were due by today
@@ -1000,7 +1083,9 @@ const memoryResource = createResource({
         limit: z.number().optional().default(10)
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[list_check_ins] Called with args:`, JSON.stringify(args));
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
 
         const result = await pool.query(
@@ -1035,7 +1120,9 @@ const memoryResource = createResource({
         days: z.number().optional().default(30).describe('Number of days to analyze')
       }),
       handler: async (args: any, user: any) => {
-        if (!user) throw new Error('Authentication required');
+        console.log(`[accountability_summary] Called with args:`, JSON.stringify(args));
+
+        if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const days = args.days || 30;
 
