@@ -18,6 +18,7 @@ const PORT = parseInt(process.env.PORT || '3000');
 const DATABASE_URL = process.env.DATABASE_URL!;
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const ADMIN_SECRET = process.env.ADMIN_SECRET; // Required to access admin page
 
 // =============================================================================
 // Database Connection
@@ -579,8 +580,20 @@ async function main() {
     res.json({ status: 'ok', database: 'connected' });
   });
 
-  // Admin page
-  app.get('/admin', (_req: Request, res: Response) => {
+  // Admin page - protected by ADMIN_SECRET
+  app.get('/admin', (req: Request, res: Response) => {
+    const secret = req.query.secret as string;
+
+    if (!ADMIN_SECRET) {
+      res.status(503).send('Admin page disabled. Set ADMIN_SECRET environment variable.');
+      return;
+    }
+
+    if (secret !== ADMIN_SECRET) {
+      res.status(401).send('Unauthorized. Access: /admin?secret=YOUR_ADMIN_SECRET');
+      return;
+    }
+
     res.send(`
 <!DOCTYPE html>
 <html>
@@ -681,6 +694,7 @@ async function main() {
     <h2>Create New User</h2>
     <div id="create-message"></div>
     <form id="create-form">
+      <input type="hidden" name="admin_secret" value="${secret}">
       <label>Username</label>
       <input type="text" name="username" required>
       <label>Email</label>
@@ -739,10 +753,21 @@ async function main() {
     `);
   });
 
-  // User registration endpoint (for initial setup)
+  // User registration endpoint - protected by ADMIN_SECRET
   app.post('/register-user', async (req: Request, res: Response) => {
     try {
-      const { username, email, password } = req.body;
+      const { username, email, password, admin_secret } = req.body;
+
+      // Require admin secret
+      if (!ADMIN_SECRET) {
+        res.status(503).json({ error: 'User registration disabled. Set ADMIN_SECRET.' });
+        return;
+      }
+      if (admin_secret !== ADMIN_SECRET) {
+        res.status(401).json({ error: 'Invalid admin secret' });
+        return;
+      }
+
       if (!username || !email || !password) {
         res.status(400).json({ error: 'username, email, and password required' });
         return;
