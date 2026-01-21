@@ -100,6 +100,50 @@ async function initDatabase() {
       )
     `);
 
+    // Accountability tables
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS commitments (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+        description TEXT NOT NULL,
+        type VARCHAR(20) DEFAULT 'one-off',
+        due_date DATE NOT NULL,
+        status VARCHAR(20) DEFAULT 'open',
+        reschedule_count INTEGER DEFAULT 0,
+        outcome_notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS patterns (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        category VARCHAR(50),
+        valence VARCHAR(20) DEFAULT 'neutral',
+        examples TEXT[] DEFAULT ARRAY[]::TEXT[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS check_ins (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        date DATE DEFAULT CURRENT_DATE,
+        commitments_due INTEGER[] DEFAULT ARRAY[]::INTEGER[],
+        commitments_completed INTEGER[] DEFAULT ARRAY[]::INTEGER[],
+        notes TEXT,
+        patterns_observed INTEGER[] DEFAULT ARRAY[]::INTEGER[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     console.log('Database schema initialized');
   } finally {
     client.release();
@@ -481,6 +525,446 @@ const memoryResource = createResource({
           output += `  What: ${c.what_changed}\n`;
           output += `  Why: ${c.why_changed}\n\n`;
         }
+        return output;
+      }
+    },
+
+    // =========================================================================
+    // COMMITMENT TOOLS
+    // =========================================================================
+
+    create_commitment: {
+      description: 'Create a new commitment/accountability item',
+      inputSchema: z.object({
+        description: z.string().describe('What you are committing to'),
+        due_date: z.string().describe('Due date (YYYY-MM-DD)'),
+        type: z.enum(['one-off', 'recurring']).optional().default('one-off'),
+        project_name: z.string().optional().describe('Associated project (optional)')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        let projectId = null;
+        if (args.project_name) {
+          const proj = await pool.query(
+            'SELECT id FROM projects WHERE user_id = $1 AND name = $2',
+            [userId, args.project_name]
+          );
+          if (proj.rows.length > 0) projectId = proj.rows[0].id;
+        }
+
+        const result = await pool.query(
+          `INSERT INTO commitments (user_id, project_id, description, type, due_date)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          [userId, projectId, args.description, args.type || 'one-off', args.due_date]
+        );
+
+        return `Commitment created (ID: ${result.rows[0].id}): "${args.description}" due ${args.due_date}`;
+      }
+    },
+
+    list_commitments: {
+      description: 'List commitments by status',
+      inputSchema: z.object({
+        status: z.enum(['open', 'done', 'missed', 'rescheduled', 'all']).optional().default('open'),
+        include_overdue: z.boolean().optional().default(true)
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        let query = `SELECT c.*, p.name as project_name
+                     FROM commitments c
+                     LEFT JOIN projects p ON c.project_id = p.id
+                     WHERE c.user_id = $1`;
+        const params: any[] = [userId];
+
+        if (args.status !== 'all') {
+          query += ` AND c.status = $2`;
+          params.push(args.status || 'open');
+        }
+
+        query += ' ORDER BY c.due_date ASC';
+
+        const result = await pool.query(query, params);
+
+        if (result.rows.length === 0) {
+          return `No ${args.status || 'open'} commitments found.`;
+        }
+
+        const today = new Date().toISOString().split('T')[0];
+        let output = `Commitments (${args.status || 'open'}):\n\n`;
+
+        for (const c of result.rows) {
+          const dueDate = c.due_date.toISOString().split('T')[0];
+          const isOverdue = c.status === 'open' && dueDate < today;
+          const overdueFlag = isOverdue ? ' ⚠️ OVERDUE' : '';
+          const projectTag = c.project_name ? ` [${c.project_name}]` : '';
+          const rescheduleNote = c.reschedule_count > 0 ? ` (rescheduled ${c.reschedule_count}x)` : '';
+
+          output += `#${c.id} [${c.status.toUpperCase()}]${overdueFlag}${projectTag}\n`;
+          output += `  "${c.description}"\n`;
+          output += `  Due: ${dueDate}${rescheduleNote}\n`;
+          if (c.outcome_notes) output += `  Notes: ${c.outcome_notes}\n`;
+          output += '\n';
+        }
+
+        return output;
+      }
+    },
+
+    update_commitment: {
+      description: 'Update commitment status (done/missed)',
+      inputSchema: z.object({
+        id: z.number().describe('Commitment ID'),
+        status: z.enum(['done', 'missed']).describe('New status'),
+        outcome_notes: z.string().optional().describe('What happened')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        const completedAt = args.status === 'done' ? 'CURRENT_TIMESTAMP' : 'NULL';
+
+        const result = await pool.query(
+          `UPDATE commitments
+           SET status = $1, outcome_notes = $2, completed_at = ${completedAt}
+           WHERE id = $3 AND user_id = $4
+           RETURNING description`,
+          [args.status, args.outcome_notes || null, args.id, userId]
+        );
+
+        if (result.rows.length === 0) {
+          return `Commitment #${args.id} not found.`;
+        }
+
+        return `Commitment #${args.id} marked as ${args.status.toUpperCase()}: "${result.rows[0].description}"`;
+      }
+    },
+
+    reschedule_commitment: {
+      description: 'Reschedule a commitment to a new date',
+      inputSchema: z.object({
+        id: z.number().describe('Commitment ID'),
+        new_due_date: z.string().describe('New due date (YYYY-MM-DD)'),
+        reason: z.string().optional().describe('Reason for rescheduling')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        const result = await pool.query(
+          `UPDATE commitments
+           SET due_date = $1, status = 'rescheduled', reschedule_count = reschedule_count + 1,
+               outcome_notes = COALESCE(outcome_notes || E'\\n', '') || $2
+           WHERE id = $3 AND user_id = $4
+           RETURNING description, reschedule_count`,
+          [args.new_due_date, args.reason ? `Rescheduled: ${args.reason}` : 'Rescheduled', args.id, userId]
+        );
+
+        if (result.rows.length === 0) {
+          return `Commitment #${args.id} not found.`;
+        }
+
+        // Reset status to open after rescheduling
+        await pool.query(
+          `UPDATE commitments SET status = 'open' WHERE id = $1`,
+          [args.id]
+        );
+
+        return `Commitment #${args.id} rescheduled to ${args.new_due_date} (${result.rows[0].reschedule_count}x total): "${result.rows[0].description}"`;
+      }
+    },
+
+    // =========================================================================
+    // PATTERN TOOLS
+    // =========================================================================
+
+    create_pattern: {
+      description: 'Record a behavioral pattern/tendency',
+      inputSchema: z.object({
+        name: z.string().describe('Pattern name (e.g., "leaves completion tasks")'),
+        description: z.string().describe('What this pattern looks like'),
+        category: z.enum(['business', 'personal', 'health', 'mindset']).describe('Category'),
+        valence: z.enum(['positive', 'negative', 'neutral']).describe('Is this good, bad, or neutral?'),
+        initial_example: z.string().optional().describe('First example of this pattern')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        const examples = args.initial_example ? [args.initial_example] : [];
+
+        const result = await pool.query(
+          `INSERT INTO patterns (user_id, name, description, category, valence, examples)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [userId, args.name, args.description, args.category, args.valence, examples]
+        );
+
+        return `Pattern recorded (ID: ${result.rows[0].id}): "${args.name}" [${args.valence}/${args.category}]`;
+      }
+    },
+
+    list_patterns: {
+      description: 'List all tracked patterns',
+      inputSchema: z.object({
+        category: z.enum(['business', 'personal', 'health', 'mindset', 'all']).optional().default('all'),
+        valence: z.enum(['positive', 'negative', 'neutral', 'all']).optional().default('all')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        let query = 'SELECT * FROM patterns WHERE user_id = $1';
+        const params: any[] = [userId];
+        let paramCount = 2;
+
+        if (args.category !== 'all') {
+          query += ` AND category = $${paramCount++}`;
+          params.push(args.category);
+        }
+        if (args.valence !== 'all') {
+          query += ` AND valence = $${paramCount++}`;
+          params.push(args.valence);
+        }
+
+        query += ' ORDER BY category, name';
+
+        const result = await pool.query(query, params);
+
+        if (result.rows.length === 0) {
+          return 'No patterns recorded yet.';
+        }
+
+        let output = 'Patterns:\n\n';
+        let currentCategory = '';
+
+        for (const p of result.rows) {
+          if (p.category !== currentCategory) {
+            currentCategory = p.category;
+            output += `--- ${currentCategory.toUpperCase()} ---\n`;
+          }
+
+          const valenceIcon = p.valence === 'positive' ? '✅' : p.valence === 'negative' ? '⚠️' : '◯';
+          output += `${valenceIcon} #${p.id} ${p.name}\n`;
+          output += `   ${p.description}\n`;
+          if (p.examples && p.examples.length > 0) {
+            output += `   Examples: ${p.examples.length} recorded\n`;
+          }
+          output += '\n';
+        }
+
+        return output;
+      }
+    },
+
+    add_pattern_example: {
+      description: 'Add an example/instance of a pattern occurring',
+      inputSchema: z.object({
+        id: z.number().describe('Pattern ID'),
+        example: z.string().describe('Description of this instance')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        const result = await pool.query(
+          `UPDATE patterns
+           SET examples = array_append(examples, $1), updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2 AND user_id = $3
+           RETURNING name, array_length(examples, 1) as count`,
+          [args.example, args.id, userId]
+        );
+
+        if (result.rows.length === 0) {
+          return `Pattern #${args.id} not found.`;
+        }
+
+        return `Example added to pattern "${result.rows[0].name}" (${result.rows[0].count} total examples)`;
+      }
+    },
+
+    get_pattern: {
+      description: 'Get detailed info about a pattern including all examples',
+      inputSchema: z.object({
+        id: z.number().describe('Pattern ID')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        const result = await pool.query(
+          'SELECT * FROM patterns WHERE id = $1 AND user_id = $2',
+          [args.id, userId]
+        );
+
+        if (result.rows.length === 0) {
+          return `Pattern #${args.id} not found.`;
+        }
+
+        const p = result.rows[0];
+        const valenceIcon = p.valence === 'positive' ? '✅' : p.valence === 'negative' ? '⚠️' : '◯';
+
+        let output = `${valenceIcon} Pattern #${p.id}: ${p.name}\n`;
+        output += `Category: ${p.category} | Valence: ${p.valence}\n`;
+        output += `Description: ${p.description}\n\n`;
+
+        if (p.examples && p.examples.length > 0) {
+          output += `Examples (${p.examples.length}):\n`;
+          p.examples.forEach((ex: string, i: number) => {
+            output += `  ${i + 1}. ${ex}\n`;
+          });
+        } else {
+          output += 'No examples recorded yet.\n';
+        }
+
+        return output;
+      }
+    },
+
+    // =========================================================================
+    // CHECK-IN TOOLS
+    // =========================================================================
+
+    create_check_in: {
+      description: 'Record an accountability check-in',
+      inputSchema: z.object({
+        notes: z.string().describe('Check-in notes'),
+        commitment_ids_completed: z.array(z.number()).optional().describe('IDs of completed commitments'),
+        pattern_ids_observed: z.array(z.number()).optional().describe('IDs of patterns that showed up')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        // Get commitments that were due by today
+        const today = new Date().toISOString().split('T')[0];
+        const dueResult = await pool.query(
+          `SELECT id FROM commitments WHERE user_id = $1 AND due_date <= $2 AND status = 'open'`,
+          [userId, today]
+        );
+        const commitmentsDue = dueResult.rows.map(r => r.id);
+
+        const result = await pool.query(
+          `INSERT INTO check_ins (user_id, commitments_due, commitments_completed, notes, patterns_observed)
+           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          [
+            userId,
+            commitmentsDue,
+            args.commitment_ids_completed || [],
+            args.notes,
+            args.pattern_ids_observed || []
+          ]
+        );
+
+        // Auto-update completed commitments
+        if (args.commitment_ids_completed && args.commitment_ids_completed.length > 0) {
+          await pool.query(
+            `UPDATE commitments SET status = 'done', completed_at = CURRENT_TIMESTAMP
+             WHERE id = ANY($1) AND user_id = $2`,
+            [args.commitment_ids_completed, userId]
+          );
+        }
+
+        const completed = args.commitment_ids_completed?.length || 0;
+        const due = commitmentsDue.length;
+
+        return `Check-in recorded (ID: ${result.rows[0].id})\nCommitments: ${completed}/${due} completed`;
+      }
+    },
+
+    list_check_ins: {
+      description: 'List recent check-ins',
+      inputSchema: z.object({
+        limit: z.number().optional().default(10)
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+
+        const result = await pool.query(
+          `SELECT * FROM check_ins WHERE user_id = $1 ORDER BY date DESC LIMIT $2`,
+          [userId, args.limit || 10]
+        );
+
+        if (result.rows.length === 0) {
+          return 'No check-ins recorded yet.';
+        }
+
+        let output = 'Recent Check-ins:\n\n';
+
+        for (const c of result.rows) {
+          const due = c.commitments_due?.length || 0;
+          const completed = c.commitments_completed?.length || 0;
+          const patterns = c.patterns_observed?.length || 0;
+
+          output += `#${c.id} - ${c.date.toISOString().split('T')[0]}\n`;
+          output += `  Commitments: ${completed}/${due} completed\n`;
+          if (patterns > 0) output += `  Patterns observed: ${patterns}\n`;
+          output += `  Notes: ${c.notes?.slice(0, 100) || 'None'}${c.notes?.length > 100 ? '...' : ''}\n\n`;
+        }
+
+        return output;
+      }
+    },
+
+    accountability_summary: {
+      description: 'Get accountability summary showing commitment completion rate and pattern trends',
+      inputSchema: z.object({
+        days: z.number().optional().default(30).describe('Number of days to analyze')
+      }),
+      handler: async (args: any, user: any) => {
+        if (!user) throw new Error('Authentication required');
+        const userId = user.id || user.sub;
+        const days = args.days || 30;
+
+        // Commitment stats
+        const commitmentStats = await pool.query(
+          `SELECT status, COUNT(*) as count FROM commitments
+           WHERE user_id = $1 AND created_at > NOW() - INTERVAL '${days} days'
+           GROUP BY status`,
+          [userId]
+        );
+
+        const stats: Record<string, number> = { open: 0, done: 0, missed: 0, rescheduled: 0 };
+        for (const row of commitmentStats.rows) {
+          stats[row.status] = parseInt(row.count);
+        }
+        const total = Object.values(stats).reduce((a, b) => a + b, 0);
+        const completionRate = total > 0 ? Math.round((stats.done / total) * 100) : 0;
+
+        // Pattern frequency
+        const patternStats = await pool.query(
+          `SELECT p.id, p.name, p.valence, array_length(p.examples, 1) as example_count
+           FROM patterns p WHERE p.user_id = $1 ORDER BY example_count DESC NULLS LAST LIMIT 5`,
+          [userId]
+        );
+
+        // Reschedule frequency
+        const rescheduleStats = await pool.query(
+          `SELECT AVG(reschedule_count) as avg_reschedules FROM commitments
+           WHERE user_id = $1 AND created_at > NOW() - INTERVAL '${days} days'`,
+          [userId]
+        );
+
+        let output = `=== Accountability Summary (${days} days) ===\n\n`;
+
+        output += `📊 Commitment Stats:\n`;
+        output += `  Total: ${total}\n`;
+        output += `  ✅ Done: ${stats.done} | ⏳ Open: ${stats.open}\n`;
+        output += `  ❌ Missed: ${stats.missed} | 🔄 Rescheduled: ${stats.rescheduled}\n`;
+        output += `  Completion Rate: ${completionRate}%\n`;
+        output += `  Avg Reschedules: ${parseFloat(rescheduleStats.rows[0]?.avg_reschedules || 0).toFixed(1)}\n\n`;
+
+        if (patternStats.rows.length > 0) {
+          output += `🔍 Top Patterns:\n`;
+          for (const p of patternStats.rows) {
+            const icon = p.valence === 'positive' ? '✅' : p.valence === 'negative' ? '⚠️' : '◯';
+            output += `  ${icon} ${p.name} (${p.example_count || 0} examples)\n`;
+          }
+        }
+
         return output;
       }
     }
