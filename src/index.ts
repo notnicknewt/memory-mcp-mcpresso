@@ -532,14 +532,27 @@ async function main() {
   <h2>Memory MCP Server</h2>
   <p class="info">Login to connect Claude to your memory</p>
   ${error ? `<p class="error">${error}</p>` : ''}
-  <form method="POST" action="/authorize">
+  <form method="POST" action="/authorize" id="login-form">
+    <input type="hidden" name="response_type" value="code">
     <input type="hidden" name="client_id" value="${context.clientId}">
     <input type="hidden" name="redirect_uri" value="${context.redirectUri}">
     <input type="hidden" name="scope" value="${context.scope || ''}">
+    <input type="hidden" name="resource" value="${context.resource || ''}">
+    <input type="hidden" name="state" id="state" value="">
+    <input type="hidden" name="code_challenge" id="code_challenge" value="">
+    <input type="hidden" name="code_challenge_method" id="code_challenge_method" value="">
     <input type="text" name="username" placeholder="Username or Email" required>
     <input type="password" name="password" placeholder="Password" required>
     <button type="submit">Login & Authorize</button>
   </form>
+  <script>
+    // Capture OAuth params from URL and add to form
+    const params = new URLSearchParams(window.location.search);
+    ['state', 'code_challenge', 'code_challenge_method'].forEach(p => {
+      const el = document.getElementById(p);
+      if (el && params.get(p)) el.value = params.get(p);
+    });
+  </script>
 </body>
 </html>`;
       }
