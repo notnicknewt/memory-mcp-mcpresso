@@ -503,6 +503,9 @@ async function main() {
     issuer: SERVER_URL,
     serverUrl: SERVER_URL,
     jwtSecret: JWT_SECRET,
+    allowDynamicClientRegistration: true, // Required for Claude.ai
+    requirePkce: true,
+    allowRefreshTokens: true,
     auth: {
       authenticateUser: async (credentials: { username: string; password: string }, _context: UserAuthContext) => {
         return authenticateUser(credentials);
