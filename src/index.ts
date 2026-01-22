@@ -16,9 +16,24 @@ import type { Request, Response } from 'express';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const DATABASE_URL = process.env.DATABASE_URL!;
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+
+// Production requires stable JWT_SECRET and SERVER_URL
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT === 'production';
+
+if (IS_PRODUCTION && !process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET is required in production. Set it in Railway environment variables.');
+  process.exit(1);
+}
+if (IS_PRODUCTION && !process.env.SERVER_URL) {
+  console.error('FATAL: SERVER_URL is required in production. Set it in Railway environment variables.');
+  process.exit(1);
+}
+
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
-const ADMIN_SECRET = process.env.ADMIN_SECRET; // Required to access admin page
+
+console.log(`🔧 Config: SERVER_URL=${SERVER_URL}, IS_PRODUCTION=${IS_PRODUCTION}`);
 
 // =============================================================================
 // Database Connection
