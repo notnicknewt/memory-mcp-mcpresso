@@ -3,8 +3,8 @@
  * Built with MCPresso + mcpresso-oauth-server
  */
 import { createMCPServer, createResource } from 'mcpresso';
-import { MCPOAuthServer, MemoryStorage } from 'mcpresso-oauth-server';
-import type { OAuthUser, UserAuthContext } from 'mcpresso-oauth-server';
+import { MCPOAuthServer } from 'mcpresso-oauth-server';
+import type { OAuthUser, UserAuthContext, MCPOAuthStorage, OAuthClient, AuthorizationCode, AccessToken, RefreshToken } from 'mcpresso-oauth-server';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import crypto from 'crypto';
@@ -232,7 +232,7 @@ async function initDatabase() {
     // =========================================================================
     // FACTS TABLE (Quick profile/context storage)
     // =========================================================================
-    console.log('\n[10/10] facts table...');
+    console.log('\n[10/14] facts table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS facts (
         id SERIAL PRIMARY KEY,
@@ -248,11 +248,82 @@ async function initDatabase() {
     console.log('  OK');
 
     // =========================================================================
+    // OAUTH TABLES (Persistent token storage)
+    // =========================================================================
+    console.log('\n[11/14] oauth_clients table...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        id TEXT PRIMARY KEY,
+        secret TEXT,
+        name TEXT NOT NULL,
+        redirect_uris TEXT[] DEFAULT ARRAY[]::TEXT[],
+        grant_types TEXT[] DEFAULT ARRAY['authorization_code', 'refresh_token']::TEXT[],
+        scopes TEXT[] DEFAULT ARRAY['read', 'write']::TEXT[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('  OK');
+
+    console.log('\n[12/14] oauth_authorization_codes table...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+        code TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        scope TEXT,
+        resource TEXT,
+        code_challenge TEXT,
+        code_challenge_method TEXT,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Migration: Add resource column if missing
+    await addColumn('oauth_authorization_codes', 'resource', 'TEXT');
+    console.log('  OK');
+
+    console.log('\n[13/14] oauth_access_tokens table...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+        token TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        scope TEXT,
+        audience TEXT,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Migration: Add audience column if missing
+    await addColumn('oauth_access_tokens', 'audience', 'TEXT');
+    console.log('  OK');
+
+    console.log('\n[14/14] oauth_refresh_tokens table...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+        token TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        access_token_id TEXT,
+        scope TEXT,
+        audience TEXT,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Migration: Add audience column if missing
+    await addColumn('oauth_refresh_tokens', 'audience', 'TEXT');
+    console.log('  OK');
+
+    // =========================================================================
     // VERIFY ALL TABLES
     // =========================================================================
     console.log('\n=== Verification ===');
     const tables = ['users', 'projects', 'sessions', 'change_log', 'lessons_learned',
-                    'context_snapshots', 'commitments', 'patterns', 'check_ins', 'facts'];
+                    'context_snapshots', 'commitments', 'patterns', 'check_ins', 'facts',
+                    'oauth_clients', 'oauth_authorization_codes', 'oauth_access_tokens', 'oauth_refresh_tokens'];
     for (const table of tables) {
       const exists = await tableExists(table);
       console.log(`  ${exists ? '✓' : '✗'} ${table}`);
@@ -264,6 +335,318 @@ async function initDatabase() {
     throw error;
   } finally {
     client.release();
+  }
+}
+
+// =============================================================================
+// Postgres OAuth Storage (survives restarts)
+// =============================================================================
+
+class PostgresStorage implements MCPOAuthStorage {
+  private pool: Pool;
+  private statsCache = { clients: 0, users: 0, authorizationCodes: 0, accessTokens: 0, refreshTokens: 0 };
+
+  constructor(pool: Pool) {
+    this.pool = pool;
+    // Update stats periodically
+    this.updateStatsCache();
+    setInterval(() => this.updateStatsCache(), 60000); // Every minute
+  }
+
+  private async updateStatsCache() {
+    try {
+      const clients = await this.pool.query('SELECT COUNT(*) as count FROM oauth_clients');
+      const users = await this.pool.query('SELECT COUNT(*) as count FROM users');
+      const codes = await this.pool.query('SELECT COUNT(*) as count FROM oauth_authorization_codes');
+      const accessTokens = await this.pool.query('SELECT COUNT(*) as count FROM oauth_access_tokens');
+      const refreshTokens = await this.pool.query('SELECT COUNT(*) as count FROM oauth_refresh_tokens');
+
+      this.statsCache = {
+        clients: parseInt(clients.rows[0]?.count || 0),
+        users: parseInt(users.rows[0]?.count || 0),
+        authorizationCodes: parseInt(codes.rows[0]?.count || 0),
+        accessTokens: parseInt(accessTokens.rows[0]?.count || 0),
+        refreshTokens: parseInt(refreshTokens.rows[0]?.count || 0)
+      };
+    } catch (e) {
+      // Ignore errors during startup when tables may not exist yet
+    }
+  }
+
+  // ===== CLIENT MANAGEMENT =====
+
+  async createClient(client: OAuthClient): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO oauth_clients (id, secret, name, redirect_uris, grant_types, scopes)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET
+         secret = EXCLUDED.secret,
+         name = EXCLUDED.name,
+         redirect_uris = EXCLUDED.redirect_uris,
+         grant_types = EXCLUDED.grant_types,
+         scopes = EXCLUDED.scopes,
+         updated_at = CURRENT_TIMESTAMP`,
+      [client.id, client.secret || null, client.name, client.redirectUris || [], client.grantTypes || [], client.scopes || []]
+    );
+  }
+
+  async getClient(clientId: string): Promise<OAuthClient | null> {
+    console.log(`[PostgresStorage] Getting client: ${clientId}`);
+    const result = await this.pool.query(
+      'SELECT * FROM oauth_clients WHERE id = $1',
+      [clientId]
+    );
+    if (result.rows.length === 0) {
+      console.log(`[PostgresStorage] Client NOT found: ${clientId}`);
+      return null;
+    }
+    const row = result.rows[0];
+    console.log(`[PostgresStorage] Client found: ${row.name}, redirectUris: ${JSON.stringify(row.redirect_uris)}`);
+    return {
+      id: row.id,
+      secret: row.secret,
+      name: row.name,
+      type: row.secret ? 'confidential' : 'public',
+      redirectUris: row.redirect_uris || [],
+      grantTypes: row.grant_types || [],
+      scopes: row.scopes || [],
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at)
+    };
+  }
+
+  async listClients(): Promise<OAuthClient[]> {
+    const result = await this.pool.query('SELECT * FROM oauth_clients');
+    return result.rows.map(row => ({
+      id: row.id,
+      secret: row.secret,
+      name: row.name,
+      type: (row.secret ? 'confidential' : 'public') as 'confidential' | 'public',
+      redirectUris: row.redirect_uris || [],
+      grantTypes: row.grant_types || [],
+      scopes: row.scopes || [],
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at)
+    }));
+  }
+
+  async updateClient(clientId: string, updates: Partial<OAuthClient>): Promise<void> {
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let paramCount = 1;
+
+    if (updates.secret !== undefined) { setClauses.push(`secret = $${paramCount++}`); values.push(updates.secret); }
+    if (updates.name !== undefined) { setClauses.push(`name = $${paramCount++}`); values.push(updates.name); }
+    if (updates.redirectUris !== undefined) { setClauses.push(`redirect_uris = $${paramCount++}`); values.push(updates.redirectUris); }
+    if (updates.grantTypes !== undefined) { setClauses.push(`grant_types = $${paramCount++}`); values.push(updates.grantTypes); }
+    if (updates.scopes !== undefined) { setClauses.push(`scopes = $${paramCount++}`); values.push(updates.scopes); }
+
+    if (setClauses.length > 0) {
+      setClauses.push('updated_at = CURRENT_TIMESTAMP');
+      values.push(clientId);
+      await this.pool.query(
+        `UPDATE oauth_clients SET ${setClauses.join(', ')} WHERE id = $${paramCount}`,
+        values
+      );
+    }
+  }
+
+  async deleteClient(clientId: string): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_clients WHERE id = $1', [clientId]);
+  }
+
+  // ===== USER MANAGEMENT (uses existing users table) =====
+
+  async createUser(user: OAuthUser): Promise<void> {
+    // Users are managed through our existing users table
+    console.log('[PostgresStorage] createUser called - users managed externally');
+  }
+
+  async getUser(userId: string): Promise<OAuthUser | null> {
+    const result = await this.pool.query(
+      'SELECT * FROM users WHERE id = $1',
+      [userId]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      scopes: row.scopes || [],
+      createdAt: row.created_at || new Date(),
+      updatedAt: row.updated_at || new Date()
+    };
+  }
+
+  async getUserByUsername(username: string): Promise<OAuthUser | null> {
+    const result = await this.pool.query(
+      'SELECT * FROM users WHERE username = $1 OR email = $1',
+      [username]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      scopes: row.scopes || [],
+      createdAt: row.created_at || new Date(),
+      updatedAt: row.updated_at || new Date()
+    };
+  }
+
+  async listUsers(): Promise<OAuthUser[]> {
+    const result = await this.pool.query('SELECT * FROM users');
+    return result.rows.map(row => ({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      scopes: row.scopes || [],
+      createdAt: row.created_at || new Date(),
+      updatedAt: row.updated_at || new Date()
+    }));
+  }
+
+  async updateUser(userId: string, updates: Partial<OAuthUser>): Promise<void> {
+    // Users are managed through our existing system
+    console.log('[PostgresStorage] updateUser called - users managed externally');
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    // Users are managed through our existing system
+    console.log('[PostgresStorage] deleteUser called - users managed externally');
+  }
+
+  // ===== AUTHORIZATION CODES =====
+
+  async createAuthorizationCode(code: AuthorizationCode): Promise<void> {
+    console.log(`[PostgresStorage] Creating auth code for client=${code.clientId}, user=${code.userId}, resource=${code.resource}`);
+    await this.pool.query(
+      `INSERT INTO oauth_authorization_codes (code, client_id, user_id, redirect_uri, scope, resource, code_challenge, code_challenge_method, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [code.code, code.clientId, code.userId, code.redirectUri, code.scope || null, code.resource || null, code.codeChallenge || null, code.codeChallengeMethod || null, code.expiresAt]
+    );
+  }
+
+  async getAuthorizationCode(code: string): Promise<AuthorizationCode | null> {
+    console.log(`[PostgresStorage] Getting auth code: ${code.substring(0, 10)}...`);
+    const result = await this.pool.query(
+      'SELECT * FROM oauth_authorization_codes WHERE code = $1',
+      [code]
+    );
+    if (result.rows.length === 0) {
+      console.log(`[PostgresStorage] Auth code NOT found`);
+      return null;
+    }
+    const row = result.rows[0];
+    console.log(`[PostgresStorage] Auth code found for client=${row.client_id}, user=${row.user_id}, resource=${row.resource}`);
+    return {
+      code: row.code,
+      clientId: row.client_id,
+      userId: row.user_id,
+      redirectUri: row.redirect_uri,
+      scope: row.scope,
+      resource: row.resource,
+      codeChallenge: row.code_challenge,
+      codeChallengeMethod: row.code_challenge_method as 'S256' | 'plain' | undefined,
+      expiresAt: new Date(row.expires_at),
+      createdAt: new Date(row.created_at)
+    };
+  }
+
+  async deleteAuthorizationCode(code: string): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_authorization_codes WHERE code = $1', [code]);
+  }
+
+  async cleanupExpiredCodes(): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_authorization_codes WHERE expires_at < NOW()');
+  }
+
+  // ===== ACCESS TOKENS =====
+
+  async createAccessToken(token: AccessToken): Promise<void> {
+    console.log(`[PostgresStorage] Creating access token for client=${token.clientId}, user=${token.userId}, audience=${token.audience}`);
+    await this.pool.query(
+      `INSERT INTO oauth_access_tokens (token, client_id, user_id, scope, audience, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [token.token, token.clientId, token.userId, token.scope || null, token.audience || null, token.expiresAt]
+    );
+  }
+
+  async getAccessToken(token: string): Promise<AccessToken | null> {
+    const result = await this.pool.query(
+      'SELECT * FROM oauth_access_tokens WHERE token = $1',
+      [token]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      token: row.token,
+      clientId: row.client_id,
+      userId: row.user_id,
+      scope: row.scope,
+      audience: row.audience,
+      expiresAt: new Date(row.expires_at),
+      createdAt: new Date(row.created_at)
+    };
+  }
+
+  async deleteAccessToken(token: string): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_access_tokens WHERE token = $1', [token]);
+  }
+
+  async cleanupExpiredTokens(): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_access_tokens WHERE expires_at < NOW()');
+  }
+
+  // ===== REFRESH TOKENS =====
+
+  async createRefreshToken(token: RefreshToken): Promise<void> {
+    console.log(`[PostgresStorage] Creating refresh token for client=${token.clientId}, user=${token.userId}, audience=${token.audience}`);
+    await this.pool.query(
+      `INSERT INTO oauth_refresh_tokens (token, client_id, user_id, access_token_id, scope, audience, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [token.token, token.clientId, token.userId, token.accessTokenId || null, token.scope || null, token.audience || null, token.expiresAt]
+    );
+  }
+
+  async getRefreshToken(token: string): Promise<RefreshToken | null> {
+    const result = await this.pool.query(
+      'SELECT * FROM oauth_refresh_tokens WHERE token = $1',
+      [token]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      token: row.token,
+      clientId: row.client_id,
+      userId: row.user_id,
+      accessTokenId: row.access_token_id,
+      scope: row.scope,
+      audience: row.audience,
+      expiresAt: new Date(row.expires_at),
+      createdAt: new Date(row.created_at)
+    };
+  }
+
+  async deleteRefreshToken(token: string): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_refresh_tokens WHERE token = $1', [token]);
+  }
+
+  async deleteRefreshTokensByAccessToken(accessTokenId: string): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_refresh_tokens WHERE access_token_id = $1', [accessTokenId]);
+  }
+
+  async cleanupExpiredRefreshTokens(): Promise<void> {
+    await this.pool.query('DELETE FROM oauth_refresh_tokens WHERE expires_at < NOW()');
+  }
+
+  // ===== UTILITY =====
+
+  getStats() {
+    // Returns cached stats (updated every minute)
+    return this.statsCache;
   }
 }
 
@@ -1427,6 +1810,261 @@ const memoryResource = createResource({
 
         return output;
       }
+    },
+
+    // =========================================================================
+    // SEARCH & BRIEFING TOOLS
+    // =========================================================================
+
+    search_all: {
+      description: 'Full-text search across all memory: facts, lessons, patterns, commitments, changes.',
+      inputSchema: z.object({
+        query: z.string().default('').describe('Search term - REQUIRED'),
+        limit: z.number().default(20).describe('Max results per category')
+      }),
+      handler: async (args: any, user: any) => {
+        console.log(`[search_all] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.query || args.query.trim() === '') {
+          return 'Error: query is required. Usage: search_all(query: "gym", limit?: 20)';
+        }
+
+        if (!user) return 'Error: Authentication required';
+        const userId = user.id || user.sub;
+        const searchTerm = `%${args.query.trim().toLowerCase()}%`;
+        const limit = args.limit || 20;
+
+        let output = `=== Search Results for "${args.query}" ===\n\n`;
+        let totalResults = 0;
+
+        try {
+          // Search facts
+          const facts = await pool.query(
+            `SELECT key, value, category FROM facts
+             WHERE user_id = $1 AND (LOWER(key) LIKE $2 OR LOWER(value) LIKE $2)
+             LIMIT $3`,
+            [userId, searchTerm, limit]
+          );
+          if (facts.rows.length > 0) {
+            output += `📝 FACTS (${facts.rows.length}):\n`;
+            for (const f of facts.rows) {
+              output += `  [${f.category}] ${f.key}: ${f.value}\n`;
+            }
+            output += '\n';
+            totalResults += facts.rows.length;
+          }
+
+          // Search lessons
+          const lessons = await pool.query(
+            `SELECT problem, solution FROM lessons_learned l
+             JOIN projects p ON l.project_id = p.id
+             WHERE p.user_id = $1 AND (LOWER(problem) LIKE $2 OR LOWER(solution) LIKE $2)
+             LIMIT $3`,
+            [userId, searchTerm, limit]
+          );
+          if (lessons.rows.length > 0) {
+            output += `💡 LESSONS (${lessons.rows.length}):\n`;
+            for (const l of lessons.rows) {
+              output += `  Problem: ${l.problem.slice(0, 80)}${l.problem.length > 80 ? '...' : ''}\n`;
+              output += `  Solution: ${l.solution.slice(0, 80)}${l.solution.length > 80 ? '...' : ''}\n\n`;
+            }
+            totalResults += lessons.rows.length;
+          }
+
+          // Search patterns
+          const patterns = await pool.query(
+            `SELECT id, name, description, valence FROM patterns
+             WHERE user_id = $1 AND (LOWER(name) LIKE $2 OR LOWER(description) LIKE $2)
+             LIMIT $3`,
+            [userId, searchTerm, limit]
+          );
+          if (patterns.rows.length > 0) {
+            output += `🔍 PATTERNS (${patterns.rows.length}):\n`;
+            for (const p of patterns.rows) {
+              const icon = p.valence === 'positive' ? '✅' : p.valence === 'negative' ? '⚠️' : '◯';
+              output += `  ${icon} #${p.id} ${p.name}: ${p.description?.slice(0, 60) || ''}${p.description?.length > 60 ? '...' : ''}\n`;
+            }
+            output += '\n';
+            totalResults += patterns.rows.length;
+          }
+
+          // Search commitments
+          const commitments = await pool.query(
+            `SELECT id, description, status, due_date FROM commitments
+             WHERE user_id = $1 AND LOWER(description) LIKE $2
+             LIMIT $3`,
+            [userId, searchTerm, limit]
+          );
+          if (commitments.rows.length > 0) {
+            output += `📋 COMMITMENTS (${commitments.rows.length}):\n`;
+            for (const c of commitments.rows) {
+              const dueDate = c.due_date?.toISOString().split('T')[0] || 'no date';
+              output += `  #${c.id} [${c.status}] ${c.description.slice(0, 60)}${c.description.length > 60 ? '...' : ''} (${dueDate})\n`;
+            }
+            output += '\n';
+            totalResults += commitments.rows.length;
+          }
+
+          // Search change log
+          const changes = await pool.query(
+            `SELECT c.file_path, c.what_changed, c.why_changed, c.created_at FROM change_log c
+             JOIN projects p ON c.project_id = p.id
+             WHERE p.user_id = $1 AND (LOWER(what_changed) LIKE $2 OR LOWER(why_changed) LIKE $2 OR LOWER(file_path) LIKE $2)
+             ORDER BY c.created_at DESC
+             LIMIT $3`,
+            [userId, searchTerm, limit]
+          );
+          if (changes.rows.length > 0) {
+            output += `📁 CHANGES (${changes.rows.length}):\n`;
+            for (const c of changes.rows) {
+              output += `  ${c.file_path}: ${c.what_changed.slice(0, 50)}${c.what_changed.length > 50 ? '...' : ''}\n`;
+            }
+            output += '\n';
+            totalResults += changes.rows.length;
+          }
+
+          if (totalResults === 0) {
+            output += `No results found for "${args.query}".\n`;
+          } else {
+            output += `--- Total: ${totalResults} results ---\n`;
+          }
+
+          return output;
+        } catch (e: any) {
+          console.error(`[search_all] Error:`, e.message);
+          return `Error searching: ${e.message}`;
+        }
+      }
+    },
+
+    daily_briefing: {
+      description: 'Get morning briefing: quick facts, due today, overdue, upcoming week, recent patterns.',
+      inputSchema: z.object({}),
+      handler: async (_args: any, user: any) => {
+        console.log(`[daily_briefing] Called`);
+
+        if (!user) return 'Error: Authentication required';
+        const userId = user.id || user.sub;
+        const today = new Date().toISOString().split('T')[0];
+        const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+
+        let output = `☀️ DAILY BRIEFING - ${dayOfWeek}, ${today}\n`;
+        output += `${'='.repeat(45)}\n\n`;
+
+        try {
+          // Quick facts summary
+          const factsCount = await pool.query(
+            'SELECT COUNT(*) as count FROM facts WHERE user_id = $1',
+            [userId]
+          );
+          const keyFacts = await pool.query(
+            `SELECT key, value FROM facts WHERE user_id = $1
+             AND category IN ('schedule', 'personal')
+             ORDER BY updated_at DESC LIMIT 5`,
+            [userId]
+          );
+          if (keyFacts.rows.length > 0) {
+            output += `📌 KEY FACTS:\n`;
+            for (const f of keyFacts.rows) {
+              output += `  ${f.key}: ${f.value}\n`;
+            }
+            output += '\n';
+          }
+
+          // Due TODAY
+          const dueToday = await pool.query(
+            `SELECT id, description FROM commitments
+             WHERE user_id = $1 AND status = 'open' AND due_date = CURRENT_DATE`,
+            [userId]
+          );
+          if (dueToday.rows.length > 0) {
+            output += `⚡ DUE TODAY (${dueToday.rows.length}):\n`;
+            for (const c of dueToday.rows) {
+              output += `  #${c.id} ${c.description}\n`;
+            }
+            output += '\n';
+          } else {
+            output += `⚡ DUE TODAY: Nothing due today\n\n`;
+          }
+
+          // OVERDUE
+          const overdue = await pool.query(
+            `SELECT id, description, due_date FROM commitments
+             WHERE user_id = $1 AND status = 'open' AND due_date < CURRENT_DATE
+             ORDER BY due_date ASC`,
+            [userId]
+          );
+          if (overdue.rows.length > 0) {
+            output += `🚨 OVERDUE (${overdue.rows.length}):\n`;
+            for (const c of overdue.rows) {
+              const dueDate = c.due_date.toISOString().split('T')[0];
+              output += `  #${c.id} ${c.description} (was due ${dueDate})\n`;
+            }
+            output += '\n';
+          }
+
+          // Upcoming this week
+          const upcoming = await pool.query(
+            `SELECT id, description, due_date FROM commitments
+             WHERE user_id = $1 AND status = 'open'
+             AND due_date > CURRENT_DATE AND due_date <= CURRENT_DATE + INTERVAL '7 days'
+             ORDER BY due_date ASC`,
+            [userId]
+          );
+          if (upcoming.rows.length > 0) {
+            output += `📅 THIS WEEK (${upcoming.rows.length}):\n`;
+            for (const c of upcoming.rows) {
+              const dueDate = c.due_date.toISOString().split('T')[0];
+              const dayName = new Date(c.due_date).toLocaleDateString('en-US', { weekday: 'short' });
+              output += `  #${c.id} ${c.description} (${dayName} ${dueDate})\n`;
+            }
+            output += '\n';
+          }
+
+          // Completion rate
+          const stats = await pool.query(
+            `SELECT status, COUNT(*) as count FROM commitments
+             WHERE user_id = $1 AND created_at > NOW() - INTERVAL '30 days'
+             GROUP BY status`,
+            [userId]
+          );
+          const statusCounts: Record<string, number> = { open: 0, done: 0, missed: 0 };
+          for (const row of stats.rows) {
+            statusCounts[row.status] = parseInt(row.count);
+          }
+          const total = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+          const rate = total > 0 ? Math.round((statusCounts.done / total) * 100) : 0;
+
+          output += `📊 30-DAY STATS: ${rate}% completion (${statusCounts.done}/${total})\n\n`;
+
+          // Recent patterns to watch
+          const negativePatterns = await pool.query(
+            `SELECT name FROM patterns WHERE user_id = $1 AND valence = 'negative'
+             ORDER BY updated_at DESC LIMIT 2`,
+            [userId]
+          );
+          const positivePatterns = await pool.query(
+            `SELECT name FROM patterns WHERE user_id = $1 AND valence = 'positive'
+             ORDER BY updated_at DESC LIMIT 2`,
+            [userId]
+          );
+
+          if (negativePatterns.rows.length > 0 || positivePatterns.rows.length > 0) {
+            output += `🔍 PATTERNS TO WATCH:\n`;
+            for (const p of negativePatterns.rows) {
+              output += `  ⚠️ ${p.name}\n`;
+            }
+            for (const p of positivePatterns.rows) {
+              output += `  ✅ ${p.name}\n`;
+            }
+          }
+
+          return output;
+        } catch (e: any) {
+          console.error(`[daily_briefing] Error:`, e.message);
+          return `Error generating briefing: ${e.message}`;
+        }
+      }
     }
   }
 });
@@ -1439,8 +2077,9 @@ async function main() {
   // Initialize database
   await initDatabase();
 
-  // Create storage for OAuth (using in-memory for simplicity - tokens stored in memory)
-  const storage = new MemoryStorage();
+  // Create storage for OAuth (Postgres-backed - survives restarts)
+  const storage = new PostgresStorage(pool);
+  console.log('✅ Using PostgresStorage for OAuth (persistent)');
 
   // Create OAuth server
   const oauthServer = new MCPOAuthServer({
@@ -1538,6 +2177,27 @@ async function main() {
   // Health check
   app.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', database: 'connected' });
+  });
+
+  // Debug endpoint - check OAuth tables (protected by ADMIN_SECRET)
+  app.get('/debug/oauth', async (req: Request, res: Response) => {
+    const secret = req.query.secret as string;
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const clients = await pool.query('SELECT id, name, redirect_uris, created_at FROM oauth_clients ORDER BY created_at DESC LIMIT 5');
+      const codes = await pool.query('SELECT code, client_id, user_id, resource, expires_at, created_at FROM oauth_authorization_codes ORDER BY created_at DESC LIMIT 5');
+      const tokens = await pool.query('SELECT LEFT(token, 20) as token_prefix, client_id, user_id, audience, expires_at FROM oauth_access_tokens ORDER BY created_at DESC LIMIT 5');
+      res.json({
+        clients: clients.rows,
+        recent_auth_codes: codes.rows.map(r => ({ ...r, code: r.code.substring(0, 10) + '...' })),
+        recent_tokens: tokens.rows
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // Admin page - protected by ADMIN_SECRET
