@@ -214,7 +214,7 @@ async function initDatabase() {
     // =========================================================================
     // CHECK_INS TABLE (Accountability)
     // =========================================================================
-    console.log('\n[9/9] check_ins table...');
+    console.log('\n[9/10] check_ins table...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS check_ins (
         id SERIAL PRIMARY KEY,
@@ -230,11 +230,29 @@ async function initDatabase() {
     console.log('  OK');
 
     // =========================================================================
+    // FACTS TABLE (Quick profile/context storage)
+    // =========================================================================
+    console.log('\n[10/10] facts table...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS facts (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        key VARCHAR(255) NOT NULL,
+        value TEXT NOT NULL,
+        category VARCHAR(100) DEFAULT 'general',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, key)
+      )
+    `);
+    console.log('  OK');
+
+    // =========================================================================
     // VERIFY ALL TABLES
     // =========================================================================
     console.log('\n=== Verification ===');
     const tables = ['users', 'projects', 'sessions', 'change_log', 'lessons_learned',
-                    'context_snapshots', 'commitments', 'patterns', 'check_ins'];
+                    'context_snapshots', 'commitments', 'patterns', 'check_ins', 'facts'];
     for (const table of tables) {
       const exists = await tableExists(table);
       console.log(`  ${exists ? '✓' : '✗'} ${table}`);
@@ -1114,10 +1132,175 @@ const memoryResource = createResource({
       }
     },
 
-    accountability_summary: {
-      description: 'Get accountability summary showing commitment completion rate and pattern trends',
+    // =========================================================================
+    // FACTS TOOLS (Quick profile/context storage)
+    // =========================================================================
+
+    add_fact: {
+      description: 'Store a quick fact or profile info. REQUIRED: key, value.',
       inputSchema: z.object({
-        days: z.number().optional().default(30).describe('Number of days to analyze')
+        key: z.string().default('').describe('Fact key/name (e.g., "elise_age", "gym_time") - REQUIRED'),
+        value: z.string().default('').describe('Fact value (e.g., "11 years old", "11am weekdays") - REQUIRED'),
+        category: z.string().default('general').describe('Category: personal, schedule, business, health, etc.')
+      }),
+      handler: async (args: any, user: any) => {
+        console.log(`[add_fact] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.key || args.key.trim() === '' || !args.value || args.value.trim() === '') {
+          return 'Error: key and value are required. Usage: add_fact(key: "gym_time", value: "11am weekdays", category?: "schedule")';
+        }
+
+        if (!user) return 'Error: Authentication required';
+        const userId = user.id || user.sub;
+
+        try {
+          // Upsert - insert or update if key exists
+          const result = await pool.query(
+            `INSERT INTO facts (user_id, key, value, category)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id, key) DO UPDATE SET value = $3, category = $4, updated_at = CURRENT_TIMESTAMP
+             RETURNING id`,
+            [userId, args.key.trim(), args.value.trim(), args.category || 'general']
+          );
+
+          return `Fact saved: "${args.key}" = "${args.value}" [${args.category || 'general'}]`;
+        } catch (e: any) {
+          console.error(`[add_fact] Error:`, e.message);
+          return `Error saving fact: ${e.message}`;
+        }
+      }
+    },
+
+    get_facts: {
+      description: 'List stored facts/profile info. Optionally filter by category.',
+      inputSchema: z.object({
+        category: z.string().default('').describe('Filter by category (leave empty for all)')
+      }),
+      handler: async (args: any, user: any) => {
+        console.log(`[get_facts] Called with args:`, JSON.stringify(args));
+
+        if (!user) return 'Error: Authentication required';
+        const userId = user.id || user.sub;
+
+        try {
+          let query = 'SELECT * FROM facts WHERE user_id = $1';
+          const params: any[] = [userId];
+
+          if (args.category && args.category.trim() !== '') {
+            query += ' AND category = $2';
+            params.push(args.category.trim());
+          }
+
+          query += ' ORDER BY category, key';
+
+          const result = await pool.query(query, params);
+
+          if (result.rows.length === 0) {
+            return args.category
+              ? `No facts found in category "${args.category}".`
+              : 'No facts stored yet. Use add_fact to store profile info.';
+          }
+
+          let output = '=== Quick Facts ===\n\n';
+          let currentCategory = '';
+
+          for (const f of result.rows) {
+            if (f.category !== currentCategory) {
+              currentCategory = f.category;
+              output += `--- ${currentCategory.toUpperCase()} ---\n`;
+            }
+            output += `  ${f.key}: ${f.value}\n`;
+          }
+
+          return output;
+        } catch (e: any) {
+          console.error(`[get_facts] Error:`, e.message);
+          return `Error retrieving facts: ${e.message}`;
+        }
+      }
+    },
+
+    update_fact: {
+      description: 'Update an existing fact. REQUIRED: key, value.',
+      inputSchema: z.object({
+        key: z.string().default('').describe('Fact key to update - REQUIRED'),
+        value: z.string().default('').describe('New value - REQUIRED'),
+        category: z.string().default('').describe('New category (optional)')
+      }),
+      handler: async (args: any, user: any) => {
+        console.log(`[update_fact] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.key || args.key.trim() === '' || !args.value || args.value.trim() === '') {
+          return 'Error: key and value are required. Usage: update_fact(key: "gym_time", value: "10am weekdays")';
+        }
+
+        if (!user) return 'Error: Authentication required';
+        const userId = user.id || user.sub;
+
+        try {
+          let query = 'UPDATE facts SET value = $1, updated_at = CURRENT_TIMESTAMP';
+          const params: any[] = [args.value.trim()];
+          let paramCount = 2;
+
+          if (args.category && args.category.trim() !== '') {
+            query += `, category = $${paramCount++}`;
+            params.push(args.category.trim());
+          }
+
+          query += ` WHERE user_id = $${paramCount++} AND key = $${paramCount++} RETURNING key, value`;
+          params.push(userId, args.key.trim());
+
+          const result = await pool.query(query, params);
+
+          if (result.rows.length === 0) {
+            return `Fact "${args.key}" not found. Use add_fact to create it.`;
+          }
+
+          return `Updated: "${args.key}" = "${args.value}"`;
+        } catch (e: any) {
+          console.error(`[update_fact] Error:`, e.message);
+          return `Error updating fact: ${e.message}`;
+        }
+      }
+    },
+
+    delete_fact: {
+      description: 'Delete a stored fact. REQUIRED: key.',
+      inputSchema: z.object({
+        key: z.string().default('').describe('Fact key to delete - REQUIRED')
+      }),
+      handler: async (args: any, user: any) => {
+        console.log(`[delete_fact] Called with args:`, JSON.stringify(args));
+
+        if (!args || !args.key || args.key.trim() === '') {
+          return 'Error: key is required. Usage: delete_fact(key: "old_fact")';
+        }
+
+        if (!user) return 'Error: Authentication required';
+        const userId = user.id || user.sub;
+
+        try {
+          const result = await pool.query(
+            'DELETE FROM facts WHERE user_id = $1 AND key = $2 RETURNING key',
+            [userId, args.key.trim()]
+          );
+
+          if (result.rows.length === 0) {
+            return `Fact "${args.key}" not found.`;
+          }
+
+          return `Deleted fact: "${args.key}"`;
+        } catch (e: any) {
+          console.error(`[delete_fact] Error:`, e.message);
+          return `Error deleting fact: ${e.message}`;
+        }
+      }
+    },
+
+    accountability_summary: {
+      description: 'Get full accountability snapshot: due soon, overdue, completion rate, recent patterns.',
+      inputSchema: z.object({
+        days: z.number().optional().default(30).describe('Number of days to analyze for stats')
       }),
       handler: async (args: any, user: any) => {
         console.log(`[accountability_summary] Called with args:`, JSON.stringify(args));
@@ -1125,8 +1308,52 @@ const memoryResource = createResource({
         if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
         const days = args.days || 30;
+        const today = new Date().toISOString().split('T')[0];
 
-        // Commitment stats
+        let output = `=== Accountability Snapshot ===\n`;
+        output += `📅 ${today}\n\n`;
+
+        // 1. OVERDUE COMMITMENTS
+        const overdueResult = await pool.query(
+          `SELECT id, description, due_date, reschedule_count FROM commitments
+           WHERE user_id = $1 AND status = 'open' AND due_date < CURRENT_DATE
+           ORDER BY due_date ASC`,
+          [userId]
+        );
+
+        if (overdueResult.rows.length > 0) {
+          output += `🚨 OVERDUE (${overdueResult.rows.length}):\n`;
+          for (const c of overdueResult.rows) {
+            const dueDate = c.due_date.toISOString().split('T')[0];
+            const rescheduleNote = c.reschedule_count > 0 ? ` (rescheduled ${c.reschedule_count}x)` : '';
+            output += `  #${c.id} "${c.description}" - was due ${dueDate}${rescheduleNote}\n`;
+          }
+          output += '\n';
+        }
+
+        // 2. DUE IN NEXT 7 DAYS
+        const upcomingResult = await pool.query(
+          `SELECT id, description, due_date FROM commitments
+           WHERE user_id = $1 AND status = 'open'
+           AND due_date >= CURRENT_DATE AND due_date <= CURRENT_DATE + INTERVAL '7 days'
+           ORDER BY due_date ASC`,
+          [userId]
+        );
+
+        if (upcomingResult.rows.length > 0) {
+          output += `📆 DUE NEXT 7 DAYS (${upcomingResult.rows.length}):\n`;
+          for (const c of upcomingResult.rows) {
+            const dueDate = c.due_date.toISOString().split('T')[0];
+            const isToday = dueDate === today;
+            const marker = isToday ? '⚡ TODAY' : dueDate;
+            output += `  #${c.id} "${c.description}" - ${marker}\n`;
+          }
+          output += '\n';
+        } else {
+          output += `📆 DUE NEXT 7 DAYS: None\n\n`;
+        }
+
+        // 3. COMPLETION STATS (last N days)
         const commitmentStats = await pool.query(
           `SELECT status, COUNT(*) as count FROM commitments
            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '${days} days'
@@ -1141,34 +1368,60 @@ const memoryResource = createResource({
         const total = Object.values(stats).reduce((a, b) => a + b, 0);
         const completionRate = total > 0 ? Math.round((stats.done / total) * 100) : 0;
 
-        // Pattern frequency
-        const patternStats = await pool.query(
-          `SELECT p.id, p.name, p.valence, array_length(p.examples, 1) as example_count
-           FROM patterns p WHERE p.user_id = $1 ORDER BY example_count DESC NULLS LAST LIMIT 5`,
-          [userId]
-        );
-
-        // Reschedule frequency
         const rescheduleStats = await pool.query(
           `SELECT AVG(reschedule_count) as avg_reschedules FROM commitments
            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '${days} days'`,
           [userId]
         );
 
-        let output = `=== Accountability Summary (${days} days) ===\n\n`;
-
-        output += `📊 Commitment Stats:\n`;
-        output += `  Total: ${total}\n`;
-        output += `  ✅ Done: ${stats.done} | ⏳ Open: ${stats.open}\n`;
-        output += `  ❌ Missed: ${stats.missed} | 🔄 Rescheduled: ${stats.rescheduled}\n`;
-        output += `  Completion Rate: ${completionRate}%\n`;
+        output += `📊 STATS (last ${days} days):\n`;
+        output += `  Completion Rate: ${completionRate}% (${stats.done}/${total})\n`;
+        output += `  ✅ Done: ${stats.done} | ⏳ Open: ${stats.open} | ❌ Missed: ${stats.missed}\n`;
         output += `  Avg Reschedules: ${parseFloat(rescheduleStats.rows[0]?.avg_reschedules || 0).toFixed(1)}\n\n`;
 
-        if (patternStats.rows.length > 0) {
-          output += `🔍 Top Patterns:\n`;
-          for (const p of patternStats.rows) {
+        // 4. RECENT PATTERNS FROM CHECK-INS
+        const recentCheckIns = await pool.query(
+          `SELECT patterns_observed FROM check_ins
+           WHERE user_id = $1 AND date > CURRENT_DATE - INTERVAL '14 days'
+           ORDER BY date DESC LIMIT 5`,
+          [userId]
+        );
+
+        // Collect pattern IDs from recent check-ins
+        const patternIds = new Set<number>();
+        for (const c of recentCheckIns.rows) {
+          if (c.patterns_observed) {
+            for (const id of c.patterns_observed) {
+              patternIds.add(id);
+            }
+          }
+        }
+
+        if (patternIds.size > 0) {
+          const patternDetails = await pool.query(
+            `SELECT id, name, valence FROM patterns WHERE id = ANY($1)`,
+            [Array.from(patternIds)]
+          );
+
+          output += `🔍 RECENT PATTERNS (from check-ins):\n`;
+          for (const p of patternDetails.rows) {
             const icon = p.valence === 'positive' ? '✅' : p.valence === 'negative' ? '⚠️' : '◯';
-            output += `  ${icon} ${p.name} (${p.example_count || 0} examples)\n`;
+            output += `  ${icon} ${p.name}\n`;
+          }
+        } else {
+          // Fall back to top patterns by example count
+          const topPatterns = await pool.query(
+            `SELECT name, valence, array_length(examples, 1) as count FROM patterns
+             WHERE user_id = $1 ORDER BY count DESC NULLS LAST LIMIT 3`,
+            [userId]
+          );
+
+          if (topPatterns.rows.length > 0) {
+            output += `🔍 TOP PATTERNS:\n`;
+            for (const p of topPatterns.rows) {
+              const icon = p.valence === 'positive' ? '✅' : p.valence === 'negative' ? '⚠️' : '◯';
+              output += `  ${icon} ${p.name} (${p.count || 0} examples)\n`;
+            }
           }
         }
 
