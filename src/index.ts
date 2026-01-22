@@ -3,7 +3,7 @@
  * Built with MCPresso + mcpresso-oauth-server
  */
 import { createMCPServer, createResource } from 'mcpresso';
-import { MCPOAuthServer } from 'mcpresso-oauth-server';
+import { MCPOAuthServer, MemoryStorage } from 'mcpresso-oauth-server';
 import type { OAuthUser, UserAuthContext, MCPOAuthStorage, OAuthClient, AuthorizationCode, AccessToken, RefreshToken } from 'mcpresso-oauth-server';
 import { Pool } from 'pg';
 import { z } from 'zod';
@@ -2077,9 +2077,10 @@ async function main() {
   // Initialize database
   await initDatabase();
 
-  // Create storage for OAuth (Postgres-backed - survives restarts)
-  const storage = new PostgresStorage(pool);
-  console.log('✅ Using PostgresStorage for OAuth (persistent)');
+  // TEMPORARY: Using MemoryStorage to debug OAuth issue
+  // const storage = new PostgresStorage(pool);
+  const storage = new MemoryStorage();
+  console.log('⚠️ Using MemoryStorage for OAuth (DEBUG MODE - tokens lost on restart)');
 
   // Create OAuth server
   const oauthServer = new MCPOAuthServer({
