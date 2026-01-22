@@ -333,7 +333,7 @@ const memoryResource = createResource({
     // List all projects for the authenticated user
     list_projects: {
       description: 'List all projects in memory',
-      inputSchema: { type: 'object', properties: {} } as any,
+      inputSchema: z.object({}),
       handler: async (_args: any, user: any) => {
         console.log(`[list_projects] Called`);
         if (!user) return 'Error: Authentication required';
@@ -357,20 +357,16 @@ const memoryResource = createResource({
 
     // Create a new project
     create_project: {
-      description: 'Create a new project. Requires a name parameter.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Project name (unique identifier)' },
-          description: { type: 'string', description: 'Project description' }
-        },
-        required: ['name']
-      } as any,
+      description: 'Create a new project. REQUIRED: name parameter.',
+      inputSchema: z.object({
+        name: z.string().default('').describe('Project name (unique identifier) - REQUIRED'),
+        description: z.string().default('').describe('Project description')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[create_project] Called with args:`, JSON.stringify(args));
 
-        // Validate required param (Zod made optional to handle Claude.ai empty args)
-        if (!args || !args.name) {
+        // Validate required param (Zod allows empty string via default, we check here)
+        if (!args || !args.name || args.name.trim() === '') {
           return 'Error: name parameter is required. Usage: create_project(name: "my-project", description: "optional")';
         }
 
@@ -403,18 +399,14 @@ const memoryResource = createResource({
 
     // Select an existing project
     select_project: {
-      description: 'Select a project to work with',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Project name' }
-        },
-        required: ['name']
-      } as any,
+      description: 'Select a project to work with. REQUIRED: name parameter.',
+      inputSchema: z.object({
+        name: z.string().default('').describe('Project name - REQUIRED')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[select_project] Called with args:`, JSON.stringify(args));
 
-        if (!args || !args.name) {
+        if (!args || !args.name || args.name.trim() === '') {
           return 'Error: name parameter is required. Usage: select_project(name: "my-project")';
         }
 
@@ -438,7 +430,7 @@ const memoryResource = createResource({
     // Get current project status
     status: {
       description: 'Get current project memory status',
-      inputSchema: { type: 'object', properties: {} } as any,
+      inputSchema: z.object({}),
       handler: async (_args: any, user: any) => {
         if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
@@ -479,18 +471,14 @@ const memoryResource = createResource({
 
     // Start a session
     session_start: {
-      description: 'Start a new session',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          summary: { type: 'string', description: 'What you are working on this session' }
-        },
-        required: ['summary']
-      } as any,
+      description: 'Start a new session. REQUIRED: summary parameter.',
+      inputSchema: z.object({
+        summary: z.string().default('').describe('Session focus - REQUIRED')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[session_start] Called with args:`, JSON.stringify(args));
 
-        if (!args || !args.summary) {
+        if (!args || !args.summary || args.summary.trim() === '') {
           return 'Error: summary parameter is required. Usage: session_start(summary: "Working on feature X")';
         }
 
@@ -511,19 +499,15 @@ const memoryResource = createResource({
 
     // End a session
     session_end: {
-      description: 'End the current session',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          summary: { type: 'string', description: 'What was accomplished' },
-          outcome: { type: 'string', description: 'completed/paused/blocked' }
-        },
-        required: ['summary']
-      } as any,
+      description: 'End the current session. REQUIRED: summary parameter.',
+      inputSchema: z.object({
+        summary: z.string().default('').describe('What was accomplished - REQUIRED'),
+        outcome: z.string().default('completed').describe('completed/paused/blocked')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[session_end] Called with args:`, JSON.stringify(args));
 
-        if (!args || !args.summary) {
+        if (!args || !args.summary || args.summary.trim() === '') {
           return 'Error: summary parameter is required. Usage: session_end(summary: "Completed feature X", outcome: "completed")';
         }
 
@@ -545,17 +529,13 @@ const memoryResource = createResource({
 
     // Log a change
     log_change: {
-      description: 'Log a change with reasoning',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Path to the changed file' },
-          change_type: { type: 'string', description: 'Type of change (add/modify/delete)' },
-          what_changed: { type: 'string', description: 'Description of what changed' },
-          why_changed: { type: 'string', description: 'Reason for the change' }
-        },
-        required: ['file_path', 'change_type', 'what_changed', 'why_changed']
-      } as any,
+      description: 'Log a change with reasoning. ALL parameters REQUIRED.',
+      inputSchema: z.object({
+        file_path: z.string().default('').describe('File path - REQUIRED'),
+        change_type: z.string().default('').describe('Change type - REQUIRED'),
+        what_changed: z.string().default('').describe('What changed - REQUIRED'),
+        why_changed: z.string().default('').describe('Why changed - REQUIRED')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[log_change] Called with args:`, JSON.stringify(args));
 
@@ -581,16 +561,12 @@ const memoryResource = createResource({
 
     // Add a lesson learned
     add_lesson: {
-      description: 'Record a lesson learned',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          problem: { type: 'string', description: 'Problem encountered' },
-          solution: { type: 'string', description: 'How it was solved' },
-          avoid: { type: 'string', description: 'What to avoid in future' }
-        },
-        required: ['problem', 'solution']
-      } as any,
+      description: 'Record a lesson learned. REQUIRED: problem, solution.',
+      inputSchema: z.object({
+        problem: z.string().default('').describe('Problem description - REQUIRED'),
+        solution: z.string().default('').describe('Solution - REQUIRED'),
+        avoid: z.string().default('').describe('What to avoid')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[add_lesson] Called with args:`, JSON.stringify(args));
 
@@ -617,14 +593,10 @@ const memoryResource = createResource({
     // Mark a phase complete
     phase_complete: {
       description: 'Mark a phase complete',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          phase_name: { type: 'string', description: 'Name of the phase' },
-          summary: { type: 'string', description: 'Summary of what was accomplished' }
-        },
-        required: ['phase_name', 'summary']
-      } as any,
+      inputSchema: z.object({
+        phase_name: z.string(),
+        summary: z.string()
+      }),
       handler: async (args: any, user: any) => {
         if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
@@ -645,7 +617,7 @@ const memoryResource = createResource({
     // Get lessons learned
     get_lessons: {
       description: 'Get all lessons learned',
-      inputSchema: { type: 'object', properties: {} } as any,
+      inputSchema: z.object({}),
       handler: async (_args: any, user: any) => {
         if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
@@ -673,12 +645,9 @@ const memoryResource = createResource({
     // Get recent changes
     recent_changes: {
       description: 'Get recent changes',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          limit: { type: 'number', description: 'Number of changes to return (default: 10)' }
-        }
-      } as any,
+      inputSchema: z.object({
+        limit: z.number().optional().default(10)
+      }),
       handler: async (args: any, user: any) => {
         if (!user) return 'Error: Authentication required';
         const userId = user.id || user.sub;
@@ -709,17 +678,13 @@ const memoryResource = createResource({
     // =========================================================================
 
     create_commitment: {
-      description: 'Create a new commitment/accountability item',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          description: { type: 'string', description: 'What you are committing to' },
-          due_date: { type: 'string', description: 'Due date (YYYY-MM-DD)' },
-          type: { type: 'string', enum: ['one-off', 'recurring'], description: 'Type of commitment' },
-          project_name: { type: 'string', description: 'Associated project (optional)' }
-        },
-        required: ['description', 'due_date']
-      } as any,
+      description: 'Create a new commitment/accountability item. REQUIRED: description, due_date.',
+      inputSchema: z.object({
+        description: z.string().default('').describe('What you are committing to - REQUIRED'),
+        due_date: z.string().default('').describe('Due date (YYYY-MM-DD) - REQUIRED'),
+        type: z.enum(['one-off', 'recurring']).default('one-off').describe('one-off or recurring'),
+        project_name: z.string().default('').describe('Associated project (optional)')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[create_commitment] Called with args:`, JSON.stringify(args));
 
@@ -751,13 +716,10 @@ const memoryResource = createResource({
 
     list_commitments: {
       description: 'List commitments by status',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          status: { type: 'string', enum: ['open', 'done', 'missed', 'rescheduled', 'all'], description: 'Filter by status (default: open)' },
-          include_overdue: { type: 'boolean', description: 'Include overdue items' }
-        }
-      } as any,
+      inputSchema: z.object({
+        status: z.enum(['open', 'done', 'missed', 'rescheduled', 'all']).optional(),
+        include_overdue: z.boolean().optional()
+      }),
       handler: async (args: any, user: any) => {
         try {
           if (!user) return 'Error: Authentication required';
@@ -811,16 +773,12 @@ const memoryResource = createResource({
     },
 
     update_commitment: {
-      description: 'Update commitment status (done/missed)',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'number', description: 'Commitment ID' },
-          status: { type: 'string', enum: ['done', 'missed'], description: 'New status' },
-          outcome_notes: { type: 'string', description: 'What happened' }
-        },
-        required: ['id', 'status']
-      } as any,
+      description: 'Update commitment status (done/missed). REQUIRED: id, status.',
+      inputSchema: z.object({
+        id: z.number().default(0).describe('Commitment ID - REQUIRED'),
+        status: z.enum(['done', 'missed']).default('done').describe('New status: done or missed - REQUIRED'),
+        outcome_notes: z.string().default('').describe('What happened')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[update_commitment] Called with args:`, JSON.stringify(args));
 
@@ -850,16 +808,12 @@ const memoryResource = createResource({
     },
 
     reschedule_commitment: {
-      description: 'Reschedule a commitment to a new date',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'number', description: 'Commitment ID' },
-          new_due_date: { type: 'string', description: 'New due date (YYYY-MM-DD)' },
-          reason: { type: 'string', description: 'Reason for rescheduling' }
-        },
-        required: ['id', 'new_due_date']
-      } as any,
+      description: 'Reschedule a commitment to a new date. REQUIRED: id, new_due_date.',
+      inputSchema: z.object({
+        id: z.number().default(0).describe('Commitment ID - REQUIRED'),
+        new_due_date: z.string().default('').describe('New due date (YYYY-MM-DD) - REQUIRED'),
+        reason: z.string().default('').describe('Reason for rescheduling')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[reschedule_commitment] Called with args:`, JSON.stringify(args));
 
@@ -898,18 +852,14 @@ const memoryResource = createResource({
     // =========================================================================
 
     create_pattern: {
-      description: 'Record a behavioral pattern/tendency',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Pattern name (e.g., "procrastinates on admin tasks")' },
-          description: { type: 'string', description: 'What this pattern looks like' },
-          category: { type: 'string', enum: ['business', 'personal', 'health', 'mindset'], description: 'Category' },
-          valence: { type: 'string', enum: ['positive', 'negative', 'neutral'], description: 'Is this good, bad, or neutral?' },
-          initial_example: { type: 'string', description: 'First example of this pattern' }
-        },
-        required: ['name', 'description', 'category', 'valence']
-      } as any,
+      description: 'Record a behavioral pattern/tendency. REQUIRED: name, description, category, valence.',
+      inputSchema: z.object({
+        name: z.string().default('').describe('Pattern name - REQUIRED'),
+        description: z.string().default('').describe('What this pattern looks like - REQUIRED'),
+        category: z.enum(['business', 'personal', 'health', 'mindset']).default('personal').describe('Category: business, personal, health, or mindset - REQUIRED'),
+        valence: z.enum(['positive', 'negative', 'neutral']).default('neutral').describe('Valence: positive, negative, or neutral - REQUIRED'),
+        initial_example: z.string().default('').describe('First example of this pattern')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[create_pattern] Called with args:`, JSON.stringify(args));
 
@@ -934,13 +884,10 @@ const memoryResource = createResource({
 
     list_patterns: {
       description: 'List all tracked patterns',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          category: { type: 'string', enum: ['business', 'personal', 'health', 'mindset', 'all'], description: 'Filter by category' },
-          valence: { type: 'string', enum: ['positive', 'negative', 'neutral', 'all'], description: 'Filter by valence' }
-        }
-      } as any,
+      inputSchema: z.object({
+        category: z.enum(['business', 'personal', 'health', 'mindset', 'all']).optional(),
+        valence: z.enum(['positive', 'negative', 'neutral', 'all']).optional()
+      }),
       handler: async (args: any, user: any) => {
         try {
           if (!user) return 'Error: Authentication required';
@@ -998,15 +945,11 @@ const memoryResource = createResource({
     },
 
     add_pattern_example: {
-      description: 'Add an example/instance of a pattern occurring',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'number', description: 'Pattern ID' },
-          example: { type: 'string', description: 'Description of this instance' }
-        },
-        required: ['id', 'example']
-      } as any,
+      description: 'Add an example/instance of a pattern occurring. REQUIRED: id, example.',
+      inputSchema: z.object({
+        id: z.number().default(0).describe('Pattern ID - REQUIRED'),
+        example: z.string().default('').describe('Description of this instance - REQUIRED')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[add_pattern_example] Called with args:`, JSON.stringify(args));
 
@@ -1034,14 +977,10 @@ const memoryResource = createResource({
     },
 
     get_pattern: {
-      description: 'Get detailed info about a pattern including all examples',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'number', description: 'Pattern ID' }
-        },
-        required: ['id']
-      } as any,
+      description: 'Get detailed info about a pattern including all examples. REQUIRED: id.',
+      inputSchema: z.object({
+        id: z.number().default(0).describe('Pattern ID - REQUIRED')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[get_pattern] Called with args:`, JSON.stringify(args));
 
@@ -1086,16 +1025,12 @@ const memoryResource = createResource({
     // =========================================================================
 
     create_check_in: {
-      description: 'Record an accountability check-in',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          notes: { type: 'string', description: 'Check-in notes/summary' },
-          commitment_ids_completed: { type: 'array', items: { type: 'number' }, description: 'IDs of completed commitments' },
-          pattern_ids_observed: { type: 'array', items: { type: 'number' }, description: 'IDs of patterns that showed up' }
-        },
-        required: ['notes']
-      } as any,
+      description: 'Record an accountability check-in. REQUIRED: notes.',
+      inputSchema: z.object({
+        notes: z.string().default('').describe('Check-in notes - REQUIRED'),
+        commitment_ids_completed: z.array(z.number()).default([]).describe('IDs of completed commitments'),
+        pattern_ids_observed: z.array(z.number()).default([]).describe('IDs of patterns that showed up')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[create_check_in] Called with args:`, JSON.stringify(args));
 
@@ -1144,12 +1079,9 @@ const memoryResource = createResource({
 
     list_check_ins: {
       description: 'List recent check-ins',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          limit: { type: 'number', description: 'Number of check-ins to return (default: 10)' }
-        }
-      } as any,
+      inputSchema: z.object({
+        limit: z.number().optional().default(10)
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[list_check_ins] Called with args:`, JSON.stringify(args));
 
@@ -1184,12 +1116,9 @@ const memoryResource = createResource({
 
     accountability_summary: {
       description: 'Get accountability summary showing commitment completion rate and pattern trends',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          days: { type: 'number', description: 'Number of days to analyze (default: 30)' }
-        }
-      } as any,
+      inputSchema: z.object({
+        days: z.number().optional().default(30).describe('Number of days to analyze')
+      }),
       handler: async (args: any, user: any) => {
         console.log(`[accountability_summary] Called with args:`, JSON.stringify(args));
 
