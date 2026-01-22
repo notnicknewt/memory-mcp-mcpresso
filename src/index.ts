@@ -391,12 +391,17 @@ class PostgresStorage implements MCPOAuthStorage {
   }
 
   async getClient(clientId: string): Promise<OAuthClient | null> {
+    console.log(`[PostgresStorage] Getting client: ${clientId}`);
     const result = await this.pool.query(
       'SELECT * FROM oauth_clients WHERE id = $1',
       [clientId]
     );
-    if (result.rows.length === 0) return null;
+    if (result.rows.length === 0) {
+      console.log(`[PostgresStorage] Client NOT found: ${clientId}`);
+      return null;
+    }
     const row = result.rows[0];
+    console.log(`[PostgresStorage] Client found: ${row.name}, redirectUris: ${JSON.stringify(row.redirect_uris)}`);
     return {
       id: row.id,
       secret: row.secret,
@@ -405,8 +410,8 @@ class PostgresStorage implements MCPOAuthStorage {
       redirectUris: row.redirect_uris || [],
       grantTypes: row.grant_types || [],
       scopes: row.scopes || [],
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at)
     };
   }
 
@@ -420,8 +425,8 @@ class PostgresStorage implements MCPOAuthStorage {
       redirectUris: row.redirect_uris || [],
       grantTypes: row.grant_types || [],
       scopes: row.scopes || [],
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at)
     }));
   }
 
@@ -544,9 +549,9 @@ class PostgresStorage implements MCPOAuthStorage {
       scope: row.scope,
       resource: row.resource,
       codeChallenge: row.code_challenge,
-      codeChallengeMethod: row.code_challenge_method,
-      expiresAt: row.expires_at,
-      createdAt: row.created_at
+      codeChallengeMethod: row.code_challenge_method as 'S256' | 'plain' | undefined,
+      expiresAt: new Date(row.expires_at),
+      createdAt: new Date(row.created_at)
     };
   }
 
@@ -582,8 +587,8 @@ class PostgresStorage implements MCPOAuthStorage {
       userId: row.user_id,
       scope: row.scope,
       audience: row.audience,
-      expiresAt: row.expires_at,
-      createdAt: row.created_at
+      expiresAt: new Date(row.expires_at),
+      createdAt: new Date(row.created_at)
     };
   }
 
@@ -620,8 +625,8 @@ class PostgresStorage implements MCPOAuthStorage {
       accessTokenId: row.access_token_id,
       scope: row.scope,
       audience: row.audience,
-      expiresAt: row.expires_at,
-      createdAt: row.created_at
+      expiresAt: new Date(row.expires_at),
+      createdAt: new Date(row.created_at)
     };
   }
 
