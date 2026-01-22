@@ -273,12 +273,15 @@ async function initDatabase() {
         user_id TEXT NOT NULL,
         redirect_uri TEXT NOT NULL,
         scope TEXT,
+        resource TEXT,
         code_challenge TEXT,
         code_challenge_method TEXT,
         expires_at TIMESTAMP NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migration: Add resource column if missing
+    await addColumn('oauth_authorization_codes', 'resource', 'TEXT');
     console.log('  OK');
 
     console.log('\n[13/14] oauth_access_tokens table...');
@@ -288,10 +291,13 @@ async function initDatabase() {
         client_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         scope TEXT,
+        audience TEXT,
         expires_at TIMESTAMP NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migration: Add audience column if missing
+    await addColumn('oauth_access_tokens', 'audience', 'TEXT');
     console.log('  OK');
 
     console.log('\n[14/14] oauth_refresh_tokens table...');
@@ -302,10 +308,13 @@ async function initDatabase() {
         user_id TEXT NOT NULL,
         access_token_id TEXT,
         scope TEXT,
+        audience TEXT,
         expires_at TIMESTAMP NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Migration: Add audience column if missing
+    await addColumn('oauth_refresh_tokens', 'audience', 'TEXT');
     console.log('  OK');
 
     // =========================================================================
@@ -507,26 +516,33 @@ class PostgresStorage implements MCPOAuthStorage {
   // ===== AUTHORIZATION CODES =====
 
   async createAuthorizationCode(code: AuthorizationCode): Promise<void> {
+    console.log(`[PostgresStorage] Creating auth code for client=${code.clientId}, user=${code.userId}, resource=${code.resource}`);
     await this.pool.query(
-      `INSERT INTO oauth_authorization_codes (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [code.code, code.clientId, code.userId, code.redirectUri, code.scope || null, code.codeChallenge || null, code.codeChallengeMethod || null, code.expiresAt]
+      `INSERT INTO oauth_authorization_codes (code, client_id, user_id, redirect_uri, scope, resource, code_challenge, code_challenge_method, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [code.code, code.clientId, code.userId, code.redirectUri, code.scope || null, code.resource || null, code.codeChallenge || null, code.codeChallengeMethod || null, code.expiresAt]
     );
   }
 
   async getAuthorizationCode(code: string): Promise<AuthorizationCode | null> {
+    console.log(`[PostgresStorage] Getting auth code: ${code.substring(0, 10)}...`);
     const result = await this.pool.query(
       'SELECT * FROM oauth_authorization_codes WHERE code = $1',
       [code]
     );
-    if (result.rows.length === 0) return null;
+    if (result.rows.length === 0) {
+      console.log(`[PostgresStorage] Auth code NOT found`);
+      return null;
+    }
     const row = result.rows[0];
+    console.log(`[PostgresStorage] Auth code found for client=${row.client_id}, user=${row.user_id}, resource=${row.resource}`);
     return {
       code: row.code,
       clientId: row.client_id,
       userId: row.user_id,
       redirectUri: row.redirect_uri,
       scope: row.scope,
+      resource: row.resource,
       codeChallenge: row.code_challenge,
       codeChallengeMethod: row.code_challenge_method,
       expiresAt: row.expires_at,
@@ -545,10 +561,11 @@ class PostgresStorage implements MCPOAuthStorage {
   // ===== ACCESS TOKENS =====
 
   async createAccessToken(token: AccessToken): Promise<void> {
+    console.log(`[PostgresStorage] Creating access token for client=${token.clientId}, user=${token.userId}, audience=${token.audience}`);
     await this.pool.query(
-      `INSERT INTO oauth_access_tokens (token, client_id, user_id, scope, expires_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [token.token, token.clientId, token.userId, token.scope || null, token.expiresAt]
+      `INSERT INTO oauth_access_tokens (token, client_id, user_id, scope, audience, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [token.token, token.clientId, token.userId, token.scope || null, token.audience || null, token.expiresAt]
     );
   }
 
@@ -564,6 +581,7 @@ class PostgresStorage implements MCPOAuthStorage {
       clientId: row.client_id,
       userId: row.user_id,
       scope: row.scope,
+      audience: row.audience,
       expiresAt: row.expires_at,
       createdAt: row.created_at
     };
@@ -580,10 +598,11 @@ class PostgresStorage implements MCPOAuthStorage {
   // ===== REFRESH TOKENS =====
 
   async createRefreshToken(token: RefreshToken): Promise<void> {
+    console.log(`[PostgresStorage] Creating refresh token for client=${token.clientId}, user=${token.userId}, audience=${token.audience}`);
     await this.pool.query(
-      `INSERT INTO oauth_refresh_tokens (token, client_id, user_id, access_token_id, scope, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [token.token, token.clientId, token.userId, token.accessTokenId || null, token.scope || null, token.expiresAt]
+      `INSERT INTO oauth_refresh_tokens (token, client_id, user_id, access_token_id, scope, audience, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [token.token, token.clientId, token.userId, token.accessTokenId || null, token.scope || null, token.audience || null, token.expiresAt]
     );
   }
 
@@ -600,6 +619,7 @@ class PostgresStorage implements MCPOAuthStorage {
       userId: row.user_id,
       accessTokenId: row.access_token_id,
       scope: row.scope,
+      audience: row.audience,
       expiresAt: row.expires_at,
       createdAt: row.created_at
     };
