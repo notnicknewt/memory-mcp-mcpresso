@@ -12,8 +12,9 @@ Persistent memory system for Claude across all platforms (Claude Code, Desktop, 
 - **Auth:** OAuth 2.1 with PKCE, Dynamic Client Registration (RFC 7591)
 - **Database:** PostgreSQL on Railway
 - **Runtime:** Node.js 20 (Alpine Docker)
+- **Zod:** v3.x (v4 breaks MCP schema visibility)
 
-## Database Schema
+## Database Schema (10 tables)
 
 ### Core Tables
 | Table | Purpose |
@@ -32,6 +33,11 @@ Persistent memory system for Claude across all platforms (Claude Code, Desktop, 
 | `patterns` | Behavioral tendencies (positive/negative/neutral) with examples |
 | `check_ins` | Accountability check-in records linking commitments and patterns |
 
+### Quick Facts Table (Added 2026-01-22)
+| Table | Purpose |
+|-------|---------|
+| `facts` | Key-value storage for profile/context info (categories: personal, schedule, business, health, etc.) |
+
 ## MCP Tools
 
 ### Project Management
@@ -42,6 +48,12 @@ Persistent memory system for Claude across all platforms (Claude Code, Desktop, 
 - `log_change`, `recent_changes`
 - `add_lesson`, `get_lessons`
 - `phase_complete`
+
+### Quick Facts (Added 2026-01-22)
+- `add_fact` - Store key-value facts (e.g., "elise_age" = "11, school 8:30am/3:15pm")
+- `get_facts` - List all facts, optionally filter by category
+- `update_fact` - Update existing fact
+- `delete_fact` - Remove a fact
 
 ### Accountability
 - `create_commitment` - Track commitments with due dates
@@ -54,15 +66,21 @@ Persistent memory system for Claude across all platforms (Claude Code, Desktop, 
 - `get_pattern` - See all examples for a pattern
 - `create_check_in` - Record accountability session
 - `list_check_ins` - Recent check-in history
-- `accountability_summary` - Completion rate, pattern trends
+- `accountability_summary` - **Full snapshot in one call:**
+  - Overdue commitments
+  - Due in next 7 days
+  - Completion rate (last 30 days)
+  - Recent patterns from check-ins
 
 ## Configuration
 
-### Environment Variables (Railway)
-- `DATABASE_URL` - Postgres connection string (auto-set by Railway)
-- `JWT_SECRET` - For OAuth tokens
-- `SERVER_URL` - `https://memory-mcp-server-production-01c0.up.railway.app`
-- `ADMIN_SECRET` - Protects /admin page and user registration
+### Environment Variables (Railway) - CRITICAL
+| Variable | Purpose | Notes |
+|----------|---------|-------|
+| `DATABASE_URL` | Postgres connection | Auto-set by Railway |
+| `JWT_SECRET` | OAuth token signing | **Must be stable across restarts** |
+| `SERVER_URL` | `https://memory-mcp-server-production-01c0.up.railway.app` | **Must match exactly** |
+| `ADMIN_SECRET` | Protects /admin and /register-user | |
 
 ### Admin Access
 ```
@@ -73,6 +91,8 @@ https://memory-mcp-server-production-01c0.up.railway.app/admin?secret=<ADMIN_SEC
 
 ### Claude.ai (Web/Mobile)
 Settings → MCP Connectors → Add → Enter server URL → OAuth login
+
+**If "Invalid authorization" error:** Remove and re-add the connector to force fresh OAuth flow.
 
 ### Claude Desktop
 ```json
@@ -94,6 +114,21 @@ claude mcp add memory --url https://memory-mcp-server-production-01c0.up.railway
 - `src/index.ts` - Main server with all tools and OAuth
 - `Dockerfile` - Production build
 - `railway.json` - Railway deployment config
+
+## Known Issues & Fixes
+
+### Zod v4 breaks MCP schemas (Fixed 2026-01-22)
+- **Symptom:** Tools show "empty objects" for parameters in Claude.ai
+- **Cause:** Zod v4 incompatible with MCP SDK schema generation
+- **Fix:** Downgrade to Zod v3.x in package.json
+
+### "Invalid authorization" after deploy
+- **Cause:** Stale OAuth token cached by Claude.ai
+- **Fix:** Remove and re-add MCP connector in Claude.ai settings
+
+### OAuth tokens lost on restart
+- **Cause:** MemoryStorage for OAuth (in-memory)
+- **Mitigation:** JWT_SECRET must be stable; users re-auth after restart
 
 ## OAuth Notes
 - Custom login page captures `state` param via JavaScript (library bug workaround)
