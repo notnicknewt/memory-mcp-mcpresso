@@ -2174,6 +2174,27 @@ async function main() {
     res.json({ status: 'ok', database: 'connected' });
   });
 
+  // Debug endpoint - check OAuth tables (protected by ADMIN_SECRET)
+  app.get('/debug/oauth', async (req: Request, res: Response) => {
+    const secret = req.query.secret as string;
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const clients = await pool.query('SELECT id, name, redirect_uris, created_at FROM oauth_clients ORDER BY created_at DESC LIMIT 5');
+      const codes = await pool.query('SELECT code, client_id, user_id, resource, expires_at, created_at FROM oauth_authorization_codes ORDER BY created_at DESC LIMIT 5');
+      const tokens = await pool.query('SELECT LEFT(token, 20) as token_prefix, client_id, user_id, audience, expires_at FROM oauth_access_tokens ORDER BY created_at DESC LIMIT 5');
+      res.json({
+        clients: clients.rows,
+        recent_auth_codes: codes.rows.map(r => ({ ...r, code: r.code.substring(0, 10) + '...' })),
+        recent_tokens: tokens.rows
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Admin page - protected by ADMIN_SECRET
   app.get('/admin', (req: Request, res: Response) => {
     const secret = req.query.secret as string;
